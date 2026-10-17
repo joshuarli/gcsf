@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 import FSKit
 import ObjectiveC
@@ -259,13 +260,12 @@ import Testing
         let home = scratchHome()
         defer { try? FileManager.default.removeItem(at: home) }
         let calls = Mutex<[MountCall]>([])
-        let environment = GCSFCommandEnvironment(
+        let environment = commandEnvironment(
             home: home,
             mountSingleVolume: { url, bundleID, options, completion in
                 calls.withLock { $0.append(MountCall(url: url, bundleID: bundleID, options: options)) }
                 completion(URL(fileURLWithPath: "/Volumes/GCSFTest"), nil)
-            },
-            unmount: { _ in }
+            }
         )
         let positional = GCSFCommandLine.execute(["mount", "-s", "Work", "/tmp/mount"], environment: environment)
         #expect(positional.code == 2)
@@ -273,12 +273,11 @@ import Testing
         let missing = GCSFCommandLine.execute(["umount", "-s", "Work"], environment: environment)
         #expect(missing.code != 0)
         #expect(missing.err.contains("no stored URL"))
-        let failed = GCSFCommandEnvironment(
+        let failed = commandEnvironment(
             home: home,
             mountSingleVolume: { _, _, _, completion in
                 completion(nil, NSError(domain: "test", code: 7, userInfo: [NSLocalizedDescriptionKey: "identity unavailable"]))
-            },
-            unmount: { _ in }
+            }
         )
         let denied = GCSFCommandLine.execute(["mount", "-s", "Work"], environment: failed)
         #expect(denied.code != 0)
@@ -294,9 +293,8 @@ import Testing
         #expect(try ledger.url(for: "Work") == URL(fileURLWithPath: "/Volumes/GCSFTest"))
         #expect(ledger.directory.path.hasPrefix(home.path))
         let removed = Mutex(false)
-        let unmounting = GCSFCommandEnvironment(
+        let unmounting = commandEnvironment(
             home: home,
-            mountSingleVolume: { _, _, _, _ in },
             unmount: { url in
                 #expect(url == URL(fileURLWithPath: "/Volumes/GCSFTest"))
                 removed.withLock { $0 = true }
@@ -310,14 +308,159 @@ import Testing
         #expect(again.code != 0)
     }
 
-    @Test func loginStaysUnimplemented() {
-        let environment = GCSFCommandEnvironment(home: scratchHome(), mountSingleVolume: { _, _, _, _ in }, unmount: { _ in })
-        let login = GCSFCommandLine.execute(["login"], environment: environment)
-        #expect(login.code == 1)
-        #expect(login.err == "login: not implemented\n")
-        #expect(GCSFCommandLine.execute(["logout"], environment: environment).err == "logout: not implemented\n")
-        #expect(GCSFCommandLine.execute(["list"], environment: environment).code == 1)
-        #expect(GCSFCommandLine.execute(["verify"], environment: environment).code == 1)
+    @Test func sessionCommandsLoginLogoutListAndVerify() throws {
+        let home = scratchHome()
+        let legacy = home.appending(path: "legacy", directoryHint: .isDirectory)
+        defer { try? FileManager.default.removeItem(at: home) }
+        try FileManager.default.createDirectory(at: legacy, withIntermediateDirectories: true)
+        let secret = "{\"installed\":{\"client_id\":\"cid\",\"client_secret\":\"csec\"}}"
+        let toml = """
+        client_secret = \"\"\"
+        \(secret)\"\"\"
+        """
+        try toml.write(to: legacy.appending(path: "gcsf.toml"), atomically: true, encoding: .utf8)
+        let beta = """
+        [{"scopes":["https://www.googleapis.com/auth/drive"],"token":{"refresh_token":"refresh-beta","access_token":"access-beta"}}]
+        """
+        try beta.write(to: legacy.appending(path: "beta"), atomically: true, encoding: .utf8)
+        let tokens = CommandMemoryTokens()
+        let seen = Mutex<[URL]>([])
+        let server = try CommandTokenServer { body in
+            if body.contains("grant_type=refresh_token") {
+                return (200, "{\"access_token\":\"access-verify\",\"expires_in\":30}")
+            }
+            return (200, "{\"access_token\":\"access-login\",\"refresh_token\":\"refresh-login\",\"expires_in\":60}")
+        }
+        defer { server.stop() }
+        let environment = commandEnvironment(
+            home: home,
+            tokens: tokens,
+            tokenEndpoint: server.endpoint,
+            legacyConfigDirectory: legacy,
+            openBrowser: { url in
+                seen.withLock { $0.append(url) }
+                await commandCallback(auth: url, code: "auth-code")
+            }
+        )
+        let container = RuntimeBoundary.groupContainerURL(home: home)
+        let absent = GCSFCommandLine.execute(["list"], environment: environment)
+        #expect(absent.code == 0)
+        #expect(absent.out.isEmpty)
+        let settings = DriveSettings(
+            clientSecret: secret,
+            authPort: 0,
+            sessions: ["zeta", "alpha"]
+        )
+        try DriveSettingsStore.save(settings, container: container)
+        let noSession = GCSFCommandLine.execute(["login"], environment: environment)
+        #expect(noSession.code == 2)
+        #expect(seen.withLock { $0.isEmpty })
+        #expect(server.count == 0)
+        #expect(GCSFCommandLine.execute(["list", "extra"], environment: environment).code == 2)
+        let listed = GCSFCommandLine.execute(["list"], environment: environment)
+        #expect(listed.code == 0)
+        #expect(listed.out == "alpha\nzeta\n")
+        let missingToken = GCSFCommandLine.execute(["verify", "alpha"], environment: environment)
+        #expect(missingToken.code == 1)
+        #expect(server.count == 0)
+        #expect(secretFree(missingToken))
+        #expect(GCSFCommandLine.execute(["verify"], environment: environment).code == 2)
+        let logged = GCSFCommandLine.execute(["login", "work"], environment: environment)
+        #expect(logged.code == 0)
+        #expect(secretFree(logged))
+        #expect(tokens.snapshot() == ["work": "refresh-login"])
+        let loaded = try DriveSettingsStore.load(container: container)
+        #expect(loaded.sessions == ["alpha", "work", "zeta"])
+        let configText = try String(contentsOf: DriveSettingsStore.fileURL(container: container), encoding: .utf8)
+        #expect(configText.contains("refresh-login") == false)
+        #expect(configText.contains("access-login") == false)
+        #expect(configText.contains("refresh-beta") == false)
+        #expect(FileManager.default.fileExists(atPath: legacy.appending(path: "beta").path))
+        let urls = seen.withLock { $0 }
+        #expect(urls.count == 1)
+        #expect(urls.first?.host == "accounts.google.com")
+        let verified = GCSFCommandLine.execute(["verify", "work"], environment: environment)
+        #expect(verified.code == 0)
+        #expect(secretFree(verified))
+        #expect(server.count == 2)
+        let loggedOut = GCSFCommandLine.execute(["logout", "work"], environment: environment)
+        #expect(loggedOut.code == 0)
+        #expect(tokens.snapshot()["work"] == nil)
+        #expect(try DriveSettingsStore.load(container: container).sessions == ["alpha", "zeta"])
+        #expect(GCSFCommandLine.execute(["logout", "work"], environment: environment).code == 1)
+        #expect(GCSFCommandLine.execute(["logout"], environment: environment).code == 2)
+        let gone = GCSFCommandLine.execute(["verify", "work"], environment: environment)
+        #expect(gone.code == 1)
+        #expect(secretFree(gone))
+        #expect(server.count == 2)
+        let again = GCSFCommandLine.execute(["list"], environment: environment)
+        #expect(again.out == "alpha\nzeta\n")
+    }
+
+    @Test func loginMigratesWhenConfigIsMissing() throws {
+        let home = scratchHome()
+        let legacy = home.appending(path: "legacy", directoryHint: .isDirectory)
+        defer { try? FileManager.default.removeItem(at: home) }
+        let early = Mutex(0)
+        let withoutLegacy = commandEnvironment(
+            home: home,
+            legacyConfigDirectory: legacy,
+            openBrowser: { _ in
+                early.withLock { $0 += 1 }
+            }
+        )
+        let blocked = GCSFCommandLine.execute(["login", "work"], environment: withoutLegacy)
+        #expect(blocked.code == 1)
+        #expect(early.withLock { $0 } == 0)
+        let container = RuntimeBoundary.groupContainerURL(home: home)
+        #expect(FileManager.default.fileExists(atPath: DriveSettingsStore.fileURL(container: container).path) == false)
+        try FileManager.default.createDirectory(at: legacy, withIntermediateDirectories: true)
+        let secret = "{\"installed\":{\"client_id\":\"cid\",\"client_secret\":\"csec\"}}"
+        let toml = """
+        debug = false
+        auth_port = 0
+        client_secret = \"\"\"
+        \(secret)\"\"\"
+        """
+        try toml.write(to: legacy.appending(path: "gcsf.toml"), atomically: true, encoding: .utf8)
+        let alpha = """
+        [{"scopes":["https://www.googleapis.com/auth/drive"],"token":{"refresh_token":"refresh-alpha","access_token":"access-alpha"}}]
+        """
+        try alpha.write(to: legacy.appending(path: "alpha"), atomically: true, encoding: .utf8)
+        let tokens = CommandMemoryTokens()
+        let seen = Mutex<[URL]>([])
+        let server = try CommandTokenServer { _ in
+            (200, "{\"access_token\":\"access-login\",\"refresh_token\":\"refresh-login\",\"expires_in\":60}")
+        }
+        defer { server.stop() }
+        let environment = commandEnvironment(
+            home: home,
+            tokens: tokens,
+            tokenEndpoint: server.endpoint,
+            legacyConfigDirectory: legacy,
+            openBrowser: { url in
+                seen.withLock { $0.append(url) }
+                await commandCallback(auth: url, code: "auth-code")
+            }
+        )
+        let logged = GCSFCommandLine.execute(["login", "work"], environment: environment)
+        #expect(logged.code == 0)
+        #expect(secretFree(logged))
+        let loaded = try DriveSettingsStore.load(container: container)
+        #expect(loaded.sessions == ["alpha", "work"])
+        #expect(loaded.clientSecret == secret)
+        #expect(loaded.authPort == 0)
+        #expect(tokens.snapshot()["alpha"] == "refresh-alpha")
+        #expect(tokens.snapshot()["work"] == "refresh-login")
+        #expect(FileManager.default.fileExists(atPath: legacy.appending(path: "alpha").path) == false)
+        #expect(FileManager.default.fileExists(atPath: legacy.appending(path: "gcsf.toml").path))
+        let configText = try String(contentsOf: DriveSettingsStore.fileURL(container: container), encoding: .utf8)
+        #expect(configText.contains("refresh-alpha") == false)
+        #expect(configText.contains("access-alpha") == false)
+        #expect(configText.contains("refresh-login") == false)
+        #expect(configText.contains("access-login") == false)
+        #expect(seen.withLock { $0.count } == 1)
+        #expect(home.path.hasPrefix("/Users/josh/d/gcsf/.work/tmp/cli"))
     }
 }
 
@@ -328,7 +471,228 @@ private struct MountCall: Equatable {
 }
 
 private func scratchHome() -> URL {
-    URL(fileURLWithPath: "/Users/josh/d/gcsf/.work/tmp/f1-home-\(UUID().uuidString)", isDirectory: true)
+    URL(fileURLWithPath: "/Users/josh/d/gcsf/.work/tmp/cli", isDirectory: true)
+        .appending(path: "home-\(UUID().uuidString)", directoryHint: .isDirectory)
+}
+
+private func commandEnvironment(
+    home: URL,
+    tokens: any RefreshTokenStore = CommandMemoryTokens(),
+    tokenEndpoint: URL = URL(string: "http://127.0.0.1:9/token")!,
+    legacyConfigDirectory: URL? = nil,
+    openBrowser: @escaping @Sendable (URL) async -> Void = { _ in },
+    mountSingleVolume: @escaping @Sendable (URL, String, [String], @escaping @Sendable (URL?, (any Error)?) -> Void) -> Void = { _, _, _, _ in },
+    unmount: @escaping @Sendable (URL) throws -> Void = { _ in }
+) -> GCSFCommandEnvironment {
+    GCSFCommandEnvironment(
+        home: home,
+        mountSingleVolume: mountSingleVolume,
+        unmount: unmount,
+        openBrowser: openBrowser,
+        tokenEndpoint: tokenEndpoint,
+        tokens: tokens,
+        legacyConfigDirectory: legacyConfigDirectory ?? home.appending(path: "legacy", directoryHint: .isDirectory)
+    )
+}
+
+private func secretFree(_ result: GCSFCommandResult) -> Bool {
+    let text = result.out + result.err
+    let forbidden = [
+        "refresh-login",
+        "access-login",
+        "access-verify",
+        "refresh-alpha",
+        "access-alpha",
+        "refresh-beta",
+        "access-beta",
+    ]
+    return forbidden.allSatisfy { text.contains($0) == false }
+}
+
+private func commandCallback(auth: URL, code: String) async {
+    let items = URLComponents(url: auth, resolvingAgainstBaseURL: false)?.queryItems ?? []
+    func value(_ name: String) -> String? {
+        items.first { $0.name == name }?.value
+    }
+    guard let redirect = value("redirect_uri"), var components = URLComponents(string: redirect) else {
+        return
+    }
+    components.queryItems = [
+        URLQueryItem(name: "code", value: code),
+        URLQueryItem(name: "state", value: value("state")),
+    ]
+    guard let url = components.url else { return }
+    let session = URLSession(configuration: .ephemeral)
+    defer { session.finishTasksAndInvalidate() }
+    _ = try? await session.data(from: url)
+}
+
+private final class CommandMemoryTokens: RefreshTokenStore, @unchecked Sendable {
+    private let values = Mutex<[String: String]>([:])
+
+    func load(session: String) async throws -> String? {
+        values.withLock { $0[session] }
+    }
+
+    func store(session: String, refreshToken: String) async throws {
+        values.withLock { $0[session] = refreshToken }
+    }
+
+    func remove(session: String) async throws {
+        values.withLock { $0[session] = nil }
+    }
+
+    func snapshot() -> [String: String] {
+        values.withLock { $0 }
+    }
+}
+
+private final class CommandTokenServer: @unchecked Sendable {
+    let endpoint: URL
+    private let lock = NSLock()
+    private var listenFD: Int32
+    private var hits = 0
+    private let queue = DispatchQueue(label: "gcsf.test.command-token")
+    private let respond: @Sendable (String) -> (Int, String)
+
+    init(respond: @escaping @Sendable (String) -> (Int, String)) throws {
+        self.respond = respond
+        let fd = Darwin.socket(AF_INET, SOCK_STREAM, 0)
+        guard fd >= 0 else { throw POSIXError(.EIO) }
+        var yes: Int32 = 1
+        setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &yes, socklen_t(MemoryLayout.size(ofValue: yes)))
+        var address = sockaddr_in()
+        address.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+        address.sin_family = sa_family_t(AF_INET)
+        address.sin_port = 0
+        guard inet_pton(AF_INET, "127.0.0.1", &address.sin_addr) == 1 else {
+            Darwin.close(fd)
+            throw POSIXError(.EIO)
+        }
+        let bound = withUnsafePointer(to: &address) { pointer in
+            pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { raw in
+                Darwin.bind(fd, raw, socklen_t(MemoryLayout<sockaddr_in>.size))
+            }
+        }
+        guard bound == 0, Darwin.listen(fd, 16) == 0 else {
+            Darwin.close(fd)
+            throw POSIXError(.EIO)
+        }
+        var boundAddress = sockaddr_in()
+        var length = socklen_t(MemoryLayout<sockaddr_in>.size)
+        let named = withUnsafeMutablePointer(to: &boundAddress) { pointer in
+            pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { raw in
+                Darwin.getsockname(fd, raw, &length)
+            }
+        }
+        guard named == 0 else {
+            Darwin.close(fd)
+            throw POSIXError(.EIO)
+        }
+        listenFD = fd
+        let port = UInt16(bigEndian: boundAddress.sin_port)
+        endpoint = URL(string: "http://127.0.0.1:\(port)/token")!
+        queue.async { [weak self] in
+            self?.acceptLoop(fd)
+        }
+    }
+
+    var count: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return hits
+    }
+
+    func stop() {
+        lock.lock()
+        let fd = listenFD
+        listenFD = -1
+        lock.unlock()
+        if fd >= 0 {
+            Darwin.close(fd)
+        }
+    }
+
+    private func acceptLoop(_ fd: Int32) {
+        while true {
+            let client = Darwin.accept(fd, nil, nil)
+            if client < 0 {
+                if errno == EINTR {
+                    continue
+                }
+                break
+            }
+            var yes: Int32 = 1
+            setsockopt(client, SOL_SOCKET, SO_NOSIGPIPE, &yes, socklen_t(MemoryLayout.size(ofValue: yes)))
+            var timeout = timeval(tv_sec: 10, tv_usec: 0)
+            setsockopt(client, SOL_SOCKET, SO_RCVTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size))
+            setsockopt(client, SOL_SOCKET, SO_SNDTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size))
+            serve(client)
+            Darwin.close(client)
+        }
+    }
+
+    private func serve(_ fd: Int32) {
+        guard let body = try? readBody(fd) else { return }
+        lock.lock()
+        hits += 1
+        let handler = respond
+        lock.unlock()
+        let (status, payload) = handler(body)
+        var bytes = Data("HTTP/1.1 \(status) OK\r\nContent-Length: \(payload.utf8.count)\r\nConnection: close\r\nContent-Type: application/json\r\n\r\n".utf8)
+        bytes.append(Data(payload.utf8))
+        bytes.withUnsafeBytes { raw in
+            guard let base = raw.baseAddress else { return }
+            var sent = 0
+            while sent < raw.count {
+                let wrote = Darwin.write(fd, base.advanced(by: sent), raw.count - sent)
+                if wrote < 0 {
+                    if errno == EINTR { continue }
+                    return
+                }
+                if wrote == 0 { return }
+                sent += wrote
+            }
+        }
+    }
+
+    private func readBody(_ fd: Int32) throws -> String {
+        var data = Data()
+        var buffer = [UInt8](repeating: 0, count: 4096)
+        while data.range(of: Data("\r\n\r\n".utf8)) == nil {
+            if data.count > 65_536 { throw POSIXError(.EIO) }
+            let count = buffer.withUnsafeMutableBytes { raw -> Int in
+                guard let base = raw.baseAddress else { return -1 }
+                return Darwin.read(fd, base, raw.count)
+            }
+            if count <= 0 { throw POSIXError(.EIO) }
+            data.append(contentsOf: buffer.prefix(count))
+        }
+        guard let marker = data.range(of: Data("\r\n\r\n".utf8)) else {
+            throw POSIXError(.EIO)
+        }
+        let header = String(decoding: data.subdata(in: 0..<marker.lowerBound), as: UTF8.self)
+        var length = 0
+        for line in header.split(separator: "\r\n") {
+            let lower = line.lowercased()
+            if lower.hasPrefix("content-length:") {
+                length = Int(lower.dropFirst("content-length:".count).trimmingCharacters(in: .whitespaces)) ?? 0
+            }
+        }
+        var body = data.subdata(in: marker.upperBound..<data.count)
+        while body.count < length {
+            let count = buffer.withUnsafeMutableBytes { raw -> Int in
+                guard let base = raw.baseAddress else { return -1 }
+                return Darwin.read(fd, base, raw.count)
+            }
+            if count <= 0 { break }
+            body.append(contentsOf: buffer.prefix(count))
+        }
+        if body.count > length {
+            body = body.prefix(length)
+        }
+        return String(decoding: body, as: UTF8.self)
+    }
 }
 
 private func tryURL(_ string: String) -> URL {

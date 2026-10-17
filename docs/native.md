@@ -6,11 +6,19 @@ The product is implementation-incomplete. Nothing here has mounted a volume. A s
 
 `gcsf --help` lists `login`, `logout`, `list`, `verify`, `mount`, and `umount`.
 
-`login`, `logout`, `list`, and `verify` are not implemented. With no extra arguments each prints `<command>: not implemented` and exits 1. Extra arguments are a usage error.
+`gcsf login <session>` requires the session name. Omitting it is a usage error and exits 2. It loads `config.json` from the group container for that home. When the file is missing and the legacy config directory contains `gcsf.toml`, it migrates that directory first. It then runs the OAuth login, adds the session name to `DriveSettings.sessions`, and saves. It does not print the refresh token or the access token. Success exits 0.
 
-`mount` accepts only `-s <session>`. A positional directory is rejected. A valid invocation does not call the FSKit mount API. It prints `runtime mount is parked` and exits 1.
+`gcsf logout <session>` deletes the refresh token and removes the session name. A missing session exits 1.
 
-`umount` accepts only `-s <session>`. A positional argument is rejected. A valid invocation prints `runtime umount is parked` and exits 1. It does not unmount a volume.
+`gcsf list` takes no arguments. It prints session names, one per line, sorted.
+
+`gcsf verify <session>` loads the refresh token and refreshes it. Success exits 0. A missing session or token exits 1. It does not print the token.
+
+`gcsf mount -s <session>` calls `mountSingleVolume`, prints the returned URL on success, and prints the error and exits 1 on failure. No successful mount has been demonstrated. A positional mount directory is a usage error and exits 2.
+
+`umount -s` unmounts the stored URL.
+
+`make doctor` still does not open System Settings unless `OPEN_SETTINGS=1`.
 
 `make mount`, `make umount`, `make smoke`, and `make test-live` print that they are parked and exit 1.
 
@@ -26,7 +34,7 @@ Config will be `config.json` in the group container named in [docs/runtime-contr
 
 The OAuth client document is migrated, not replaced. Refresh tokens are keychain items, not files.
 
-`login` is not implemented, so this tree does not run session migration. The access group, the container, migration, and the index, journal, cache, and staging paths are in the runtime contract. This page does not restate them.
+`login` loads `config.json` from the group container and, when that file is missing, migrates `gcsf.toml` from the legacy config directory. The access group, the container, migration, and the index, journal, cache, and staging paths are in the runtime contract. This page does not restate them.
 
 ## Google-native documents
 
