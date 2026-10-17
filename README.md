@@ -10,34 +10,7 @@
 
 GCSF is a virtual filesystem that allows users to mount their Google Drive account locally and interact with it as a regular disk partition. You can find out more in this [paper](https://harababurel.com/thesis.pdf)
 
-### Requirements
-
-GCSF requires the stable branch of the Rust programming language, which can be installed following the instructions on [rustup.rs](https://rustup.rs). If you already have Rust installed, make sure that it is updated to the latest version:
-
-```bash
-$ rustup update stable
-```
-
-#### OSX
-
-On Mac OSX, GCSF requires [osxfuse](https://osxfuse.github.io/) and [pkg-config](http://macappstore.org/pkg-config/):
-
-```bash
-$ brew update; brew install pkg-config; brew tap homebrew/cask; brew install --cask osxfuse
-```
-
-### Installation
-
-After all requirements are met, GCSF can be installed using `cargo`:
-
-
-```bash
-$ cargo install gcsf
-```
-
-This will generate the `gcsf` binary in `$HOME/.cargo/bin`. Make sure that this directory is in your `PATH` variable: `export PATH=$PATH:$HOME/.cargo/bin`
-
-Alternatively, you can download a [release binary](https://github.com/harababurel/gcsf/releases) for your platform.
+The native build is `make`, and the Rust sources are on the tag `legacy-rust`.
 
 ### Configuration
 
@@ -162,23 +135,6 @@ $ md5 -q /tmp/backup.zip
 
 ### Why GCSF?
 GCSF stands for "Google Conduce Sistem de Fișiere" which translated from Romanian is "Google Drive Filesystem". However [GDFS](https://github.com/robin-thomas/GDFS) already exists so it remains GCSF.
-
-### Troubleshooting
-
-#### macOS: Could not mount to `$mountpoint` (any error code)
-
-The error code reported on macOS often does not reflect the actual cause.
-
-With macFUSE 5.3 or later, GCSF must be built from this repository, which includes a fix for [cberner/fuser#752](https://github.com/cberner/fuser/issues/752). Builds from crates.io (`cargo install gcsf`) cannot mount until fuser releases a fix.
-
-If the macFUSE kernel extension has not been approved or loaded:
-
-1. Open System Settings → Privacy & Security and allow the system software from developer "Benjamin Fleischer" (macFUSE).
-2. If nothing is shown there, load the extension manually. This prints the actual error and usually brings up the approval prompt (replace `27` with your macOS major version):
-   ```bash
-   sudo kmutil load -p /Library/Filesystems/macfuse.fs/Contents/Extensions/27/macfuse.kext
-   ```
-3. Restart if prompted, then mount again.
 
 ### Contributing
 

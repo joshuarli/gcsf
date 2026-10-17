@@ -4,40 +4,13 @@ Comprehensive end-to-end tests that validate all common filesystem operations on
 
 ## Prerequisites
 
-1. **Build GCSF**
-   ```bash
-   cargo build --release
-   ```
-
-2. **Set up authentication**
-   ```bash
-   cargo run --release -- login test_session
-   ```
-
-3. **Configure GCSF**
-
-   Edit `~/.config/gcsf/gcsf.toml`:
-   ```toml
-   rename_identical_files = true
-   sync_interval = 5
-   ```
-
-   Note: `rename_identical_files = true` is required for tests 12-14 to pass correctly.
+The script is a shell reference. It expects a filesystem that is already mounted at the path you pass. The native build is `make`. The Rust sources, including the old `cargo` login and mount commands, are on the tag `legacy-rust`.
 
 ## Running the Tests
 
 ```bash
-# Terminal 1: Mount GCSF
-mkdir -p ~/gcsf_test_mount
-cargo run --release -- mount ~/gcsf_test_mount -s test_session
-
-# Terminal 2: Run tests
 cd tests/integration
 ./test_filesystem_operations.sh --accept-risk ~/gcsf_test_mount
-
-# Terminal 1: Unmount when done
-umount ~/gcsf_test_mount
-# Or press Ctrl+C in the mount terminal
 ```
 
 ## What Gets Tested
@@ -104,15 +77,11 @@ chmod +x ./test_filesystem_operations.sh
 ```
 
 ### "Authentication failed"
-```bash
-cargo run --release -- logout test_session
-cargo run --release -- login test_session
-```
+
+Re-authenticate the session that owns the mount. The old `cargo` login commands are on the tag `legacy-rust`.
 
 ### Tests fail with "file does not exist"
 - Verify mount is active: `mount | grep gcsf`
-- Check config has `rename_identical_files = true`
-- Try increasing `sync_interval` in config if operations are too fast
 
 ### Mount is slow or unresponsive
 - Check network connection
