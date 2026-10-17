@@ -285,6 +285,7 @@ Append-only, one line per judgment call a reader would otherwise miss (the call 
 - 2026-10-16 — Overwrite safety is best-effort revalidation plus a conflict copy. `synchronize` succeeds only after Drive has the bytes.
 - 2026-10-16 — Assigned duplicate suffixes are stable across a newly appearing, lexically earlier Drive ID.
 - 2026-10-16 — `X1` tags `legacy-rust` locally before deleting the Rust tree. `make clean` does not remove journal or staged state.
+- 2026-10-17 — `F0` merged. Contracts widened before P1: optional Drive id on metadata, checksum and owner fields, and `truncate` on the engine. `D2` does not edit `Sources/gcsf-cli` while `F1` owns that directory.
 
 ## Campaign log
 

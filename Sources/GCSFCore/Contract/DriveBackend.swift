@@ -8,6 +8,10 @@ public struct DriveFile: Sendable, Equatable, Codable {
     public var size: Int64?
     public var headRevision: String?
     public var md5: String?
+    public var sha1: String?
+    public var sha256: String?
+    public var owner: String?
+    public var webViewLink: String?
     public var trashed: Bool
     public var created: Date?
     public var modified: Date?
@@ -20,6 +24,10 @@ public struct DriveFile: Sendable, Equatable, Codable {
         size: Int64?,
         headRevision: String?,
         md5: String?,
+        sha1: String?,
+        sha256: String?,
+        owner: String?,
+        webViewLink: String?,
         trashed: Bool,
         created: Date?,
         modified: Date?
@@ -31,6 +39,10 @@ public struct DriveFile: Sendable, Equatable, Codable {
         self.size = size
         self.headRevision = headRevision
         self.md5 = md5
+        self.sha1 = sha1
+        self.sha256 = sha256
+        self.owner = owner
+        self.webViewLink = webViewLink
         self.trashed = trashed
         self.created = created
         self.modified = modified

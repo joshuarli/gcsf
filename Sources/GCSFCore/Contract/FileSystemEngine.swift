@@ -100,5 +100,6 @@ public protocol FileSystemEngine: Sendable {
     func readlink(_ inode: Inode) async throws -> String
     func read(_ inode: Inode, at offset: Int64, length: Int) async throws -> Data
     func write(_ inode: Inode, bytes: Data, at offset: Int64) async throws -> Int
+    func truncate(_ inode: Inode, to length: Int64) async throws
     func synchronize() async throws
 }
