@@ -11,7 +11,7 @@ edition = "2024"
 
 
 [dependencies]
-clap = { version = "4.6.7", features = ["derive"] }
+lexopt = "0.3.2"
 config = "0.15.27"
 ctrlc = "3.5.2"
 failure = "0.1.8"

@@ -1,9 +1,9 @@
-extern crate clap;
 extern crate config;
 extern crate ctrlc;
 extern crate failure;
 extern crate fuser;
 extern crate gcsf;
+extern crate lexopt;
 #[macro_use]
 extern crate log;
 extern crate pretty_env_logger;
@@ -11,7 +11,7 @@ extern crate serde;
 extern crate serde_json;
 extern crate xdg;
 
-use clap::{Parser, Subcommand};
+use lexopt::prelude::*;
 use failure::{Error, err_msg};
 use std::fs;
 use std::io::prelude::*;
@@ -47,57 +47,292 @@ fn print_auth_troubleshooting(session_name: &str) {
 const INFO_LOG: &str =
     "hyper::client=error,hyper::http=error,hyper::net=error,fuse::session=error,info";
 
-#[derive(Parser)]
-#[command(name = "GCSF")]
-#[command(version = "0.4.0")]
-#[command(author = "Sergiu Puscas <srg.pscs@gmail.com>")]
-#[command(about = "File system based on Google Drive")]
-#[command(
-    after_help = "Note: this is a work in progress. It might cause data loss. Use with caution."
-)]
-#[command(subcommand_required = true)]
-#[command(arg_required_else_help = true)]
-struct Cli {
-    #[command(subcommand)]
-    command: Commands,
-}
+const NAME: &str = "GCSF";
+const VERSION: &str = env!("CARGO_PKG_VERSION");
 
-#[derive(Subcommand)]
-enum Commands {
-    /// Mount the file system.
+const CLI_USAGE: &str = "GCSF <COMMAND>";
+const MOUNT_USAGE: &str = "GCSF mount [OPTIONS] <mount_directory>";
+const LOGIN_USAGE: &str = "GCSF login <session_name>";
+const LOGOUT_USAGE: &str = "GCSF logout <session_name>";
+const VERIFY_USAGE: &str = "GCSF verify <session_name>";
+
+const TOP_LEVEL_HELP: &str = "\
+File system based on Google Drive
+
+Usage: GCSF <COMMAND>
+
+Commands:
+  mount   Mount the file system
+  login   Login to Drive (create a new session)
+  logout  Logout (delete a given session)
+  list    List sessions
+  verify  Verify that authentication is working for a session
+  help    Print this message or the help of the given subcommand(s)
+
+Options:
+  -h, --help     Print help
+  -V, --version  Print version
+
+Note: this is a work in progress. It might cause data loss. Use with caution.";
+
+const MOUNT_HELP: &str = "\
+Mount the file system
+
+Usage: GCSF mount [OPTIONS] <mount_directory>
+
+Arguments:
+  <mount_directory>  Path to mount directory
+
+Options:
+  -s, --session <session_name>  An existing session name set during `gcsf login`
+  -r, --read-only               Mount in read-only mode (overrides config)
+  -h, --help                    Print help";
+
+const LOGIN_HELP: &str = "\
+Login to Drive (create a new session)
+
+Usage: GCSF login <session_name>
+
+Arguments:
+  <session_name>  User-defined name for this session.
+
+Options:
+  -h, --help  Print help";
+
+const LOGOUT_HELP: &str = "\
+Logout (delete a given session)
+
+Usage: GCSF logout <session_name>
+
+Arguments:
+  <session_name>  User-defined session name.
+
+Options:
+  -h, --help  Print help";
+
+const LIST_HELP: &str = "\
+List sessions
+
+Usage: GCSF list
+
+Options:
+  -h, --help  Print help";
+
+const VERIFY_HELP: &str = "\
+Verify that authentication is working for a session
+
+Usage: GCSF verify <session_name>
+
+Arguments:
+  <session_name>  Session name to verify.
+
+Options:
+  -h, --help  Print help";
+
+const HELP_HELP: &str = "\
+Print this message or the help of the given subcommand(s)
+
+Usage: GCSF help [COMMAND]...
+
+Arguments:
+  [COMMAND]...  The subcommand whose help message to display";
+
+#[derive(Debug)]
+enum Command {
     Mount {
-        /// An existing session name set during `gcsf login`
-        #[arg(short = 's', long = "session", value_name = "session_name")]
         session_name: String,
-
-        /// Path to mount directory
-        #[arg(value_name = "mount_directory")]
         mountpoint: String,
-
-        /// Mount in read-only mode (overrides config)
-        #[arg(long = "read-only", short = 'r')]
         read_only: bool,
     },
-    /// Login to Drive (create a new session).
     Login {
-        /// User-defined name for this session.
-        #[arg(value_name = "session_name")]
         session_name: String,
     },
-    /// Logout (delete a given session).
     Logout {
-        /// User-defined session name.
-        #[arg(value_name = "session_name")]
         session_name: String,
     },
-    /// List sessions.
     List,
-    /// Verify that authentication is working for a session.
     Verify {
-        /// Session name to verify.
-        #[arg(value_name = "session_name")]
         session_name: String,
     },
+}
+
+#[derive(Debug)]
+enum CliError {
+    Parse(lexopt::Error),
+    MissingArgument {
+        usage: &'static str,
+        argument: &'static str,
+    },
+    UnrecognizedSubcommand(String),
+}
+
+impl std::fmt::Display for CliError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            CliError::Parse(error) => write!(f, "{error}"),
+            CliError::MissingArgument { argument, .. } => write!(
+                f,
+                "the following required arguments were not provided:\n  {argument}"
+            ),
+            CliError::UnrecognizedSubcommand(name) => write!(f, "unrecognized subcommand '{name}'"),
+        }
+    }
+}
+
+impl CliError {
+    fn usage(&self) -> &'static str {
+        match self {
+            CliError::MissingArgument { usage, .. } => usage,
+            _ => CLI_USAGE,
+        }
+    }
+}
+
+impl From<lexopt::Error> for CliError {
+    fn from(error: lexopt::Error) -> Self {
+        CliError::Parse(error)
+    }
+}
+
+fn print_help(topic: Option<&str>) -> Result<(), CliError> {
+    let text = match topic {
+        None => TOP_LEVEL_HELP,
+        Some("mount") => MOUNT_HELP,
+        Some("login") => LOGIN_HELP,
+        Some("logout") => LOGOUT_HELP,
+        Some("list") => LIST_HELP,
+        Some("verify") => VERIFY_HELP,
+        Some("help") => HELP_HELP,
+        Some(other) => return Err(CliError::UnrecognizedSubcommand(other.to_string())),
+    };
+    println!("{text}");
+    Ok(())
+}
+
+fn parse_session_argument(
+    parser: &mut lexopt::Parser,
+    subcommand: &str,
+    usage: &'static str,
+) -> Result<String, CliError> {
+    let mut session_name = None;
+
+    while let Some(arg) = parser.next()? {
+        match arg {
+            Short('h') | Long("help") => {
+                print_help(Some(subcommand))?;
+                std::process::exit(0);
+            }
+            Value(value) if session_name.is_none() => session_name = Some(value.string()?),
+            _ => return Err(arg.unexpected().into()),
+        }
+    }
+
+    session_name.ok_or(CliError::MissingArgument {
+        usage,
+        argument: "<session_name>",
+    })
+}
+
+fn parse_mount(parser: &mut lexopt::Parser) -> Result<Command, CliError> {
+    let mut session_name = None;
+    let mut mountpoint = None;
+    let mut read_only = false;
+
+    while let Some(arg) = parser.next()? {
+        match arg {
+            Short('s') | Long("session") => session_name = Some(parser.value()?.string()?),
+            Short('r') | Long("read-only") => read_only = true,
+            Short('h') | Long("help") => {
+                print_help(Some("mount"))?;
+                std::process::exit(0);
+            }
+            Value(value) if mountpoint.is_none() => mountpoint = Some(value.string()?),
+            _ => return Err(arg.unexpected().into()),
+        }
+    }
+
+    let session_name = session_name.ok_or(CliError::MissingArgument {
+        usage: MOUNT_USAGE,
+        argument: "--session <session_name>",
+    })?;
+    let mountpoint = mountpoint.ok_or(CliError::MissingArgument {
+        usage: MOUNT_USAGE,
+        argument: "<mount_directory>",
+    })?;
+
+    Ok(Command::Mount {
+        session_name,
+        mountpoint,
+        read_only,
+    })
+}
+
+fn parse_list(parser: &mut lexopt::Parser) -> Result<Command, CliError> {
+    while let Some(arg) = parser.next()? {
+        match arg {
+            Short('h') | Long("help") => {
+                print_help(Some("list"))?;
+                std::process::exit(0);
+            }
+            _ => return Err(arg.unexpected().into()),
+        }
+    }
+
+    Ok(Command::List)
+}
+
+fn parse_subcommand(name: &str, parser: &mut lexopt::Parser) -> Result<Command, CliError> {
+    match name {
+        "mount" => parse_mount(parser),
+        "login" => Ok(Command::Login {
+            session_name: parse_session_argument(parser, "login", LOGIN_USAGE)?,
+        }),
+        "logout" => Ok(Command::Logout {
+            session_name: parse_session_argument(parser, "logout", LOGOUT_USAGE)?,
+        }),
+        "list" => parse_list(parser),
+        "verify" => Ok(Command::Verify {
+            session_name: parse_session_argument(parser, "verify", VERIFY_USAGE)?,
+        }),
+        "help" => {
+            let topic = match parser.next()? {
+                None => None,
+                Some(Value(value)) => Some(value.string()?),
+                Some(arg) => return Err(arg.unexpected().into()),
+            };
+            print_help(topic.as_deref())?;
+            std::process::exit(0);
+        }
+        _ => Err(CliError::UnrecognizedSubcommand(name.to_string())),
+    }
+}
+
+fn parse_args() -> Result<Command, CliError> {
+    let mut parser = lexopt::Parser::from_env();
+    let mut command = None;
+
+    while let Some(arg) = parser.next()? {
+        match arg {
+            Short('h') | Long("help") => {
+                print_help(None)?;
+                std::process::exit(0);
+            }
+            Short('V') | Long("version") => {
+                println!("{NAME} {VERSION}");
+                std::process::exit(0);
+            }
+            Value(value) => command = Some(parse_subcommand(&value.string()?, &mut parser)?),
+            _ => return Err(arg.unexpected().into()),
+        }
+    }
+
+    match command {
+        Some(command) => Ok(command),
+        None => {
+            eprintln!("{TOP_LEVEL_HELP}");
+            std::process::exit(2);
+        }
+    }
 }
 
 const DEFAULT_CONFIG: &str = r#"
@@ -435,10 +670,20 @@ fn main() {
         .parse_filters(if config.debug() { DEBUG_LOG } else { INFO_LOG })
         .init();
 
-    let cli = Cli::parse();
+    let command = match parse_args() {
+        Ok(command) => command,
+        Err(error) => {
+            eprintln!("error: {error}");
+            eprintln!();
+            eprintln!("Usage: {}", error.usage());
+            eprintln!();
+            eprintln!("For more information, try '--help'.");
+            std::process::exit(2);
+        }
+    };
 
-    match cli.command {
-        Commands::Login { session_name } => {
+    match command {
+        Command::Login { session_name } => {
             config.session_name = Some(session_name);
 
             if config.token_file().exists() {
@@ -477,7 +722,7 @@ fn main() {
                 }
             };
         }
-        Commands::Logout { session_name } => {
+        Command::Logout { session_name } => {
             config.session_name = Some(session_name);
             let tf = config.token_file();
             match fs::remove_file(&tf) {
@@ -489,7 +734,7 @@ fn main() {
                 }
             };
         }
-        Commands::List => {
+        Command::List => {
             let mut sessions: Vec<_> = fs::read_dir(config.config_dir())
                 .unwrap()
                 .map(Result::unwrap)
@@ -507,7 +752,7 @@ fn main() {
                 }
             }
         }
-        Commands::Verify { session_name } => {
+        Command::Verify { session_name } => {
             config.session_name = Some(session_name.clone());
 
             if !config.token_file().exists() {
@@ -536,7 +781,7 @@ fn main() {
                 }
             }
         }
-        Commands::Mount {
+        Command::Mount {
             session_name,
             mountpoint,
             read_only,
