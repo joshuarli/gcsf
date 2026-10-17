@@ -42,11 +42,11 @@ Google-native documents are read-only. Docs, Sheets, Slides, Drawings, and Sites
 
 ## Writes
 
-The write contract is not implemented. `Engine` is empty, and the extension `synchronize` returns without a Drive acknowledgement.
+`GCSFEngine` applies POSIX operations on the index. With no journal attached, a write stays in the process and does not upload. `SQLiteWritebackJournal` stages bytes, resumes an upload, and on a moved head revision writes a conflict copy instead of updating the original file. `synchronize` throws `EIO` while a dirty item is still unuploaded. A local journal alone is not success. Race-free overwrite is not claimed.
 
-Under that contract, `fsync` succeeds only after Drive has acknowledged the bytes. A local journal is not success. Conflicts keep the staged bytes and write a new file. Race-free overwrite is not claimed.
+The states are `staged`, `journaled`, `committed`, and `conflicted`.
 
-`DurabilityState` names `staged`, `journaled`, `committed`, and `conflicted`. The runtime contract defines those states and does not implement the transitions.
+The extension process still uses `DisconnectedEngine`, which refuses every operation with `ENXIO`. It does not open the index, the journal, or Drive.
 
 ## Names
 
