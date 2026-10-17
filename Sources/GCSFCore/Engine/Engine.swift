@@ -125,13 +125,23 @@ public actor GCSFEngine: FileSystemEngine {
     private let store: SQLiteMetadataStore
     private let drive: any DriveBackend
     private let configuration: EngineConfiguration
+    private let journal: SQLiteWritebackJournal?
+    private let stagedDirectory: URL?
     private var contents: [UInt64: Data] = [:]
     private var symlinkTargets: [UInt64: String] = [:]
 
-    public init(store: SQLiteMetadataStore, drive: any DriveBackend, configuration: EngineConfiguration) {
+    public init(
+        store: SQLiteMetadataStore,
+        drive: any DriveBackend,
+        configuration: EngineConfiguration,
+        journal: SQLiteWritebackJournal? = nil,
+        stagedDirectory: URL? = nil
+    ) {
         self.store = store
         self.drive = drive
         self.configuration = configuration
+        self.journal = journal
+        self.stagedDirectory = stagedDirectory
     }
 
     public func lookup(named name: String, in parent: Inode) async throws -> EngineItem {
@@ -332,6 +342,9 @@ public actor GCSFEngine: FileSystemEngine {
         if length == 0 {
             return Data()
         }
+        if let journal, record.durability == .journaled || record.durability == .conflicted {
+            return try await readJournaled(journal, record: record, offset: offset, length: length)
+        }
         if let stored = contents[inode.rawValue] {
             return slice(stored, offset: offset, length: length, size: record.size)
         }
@@ -371,6 +384,10 @@ public actor GCSFEngine: FileSystemEngine {
             throw EngineError.posix(EOVERFLOW)
         }
         let record = try await mutableFile(inode)
+        if let journal {
+            try await journalWrite(journal, record: record, bytes: bytes, offset: offset)
+            return bytes.count
+        }
         var data = try await mutableContent(record)
         let start = Int(offset)
         let end = start + bytes.count
@@ -392,10 +409,16 @@ public actor GCSFEngine: FileSystemEngine {
         if length < 0 {
             throw EngineError.posix(EINVAL)
         }
-        guard length <= Int64(Int.max) else {
-            throw EngineError.posix(EOVERFLOW)
+        if journal == nil {
+            guard length <= Int64(Int.max) else {
+                throw EngineError.posix(EOVERFLOW)
+            }
         }
         let record = try await mutableFile(inode)
+        if let journal {
+            try await journalTruncate(journal, record: record, length: length)
+            return
+        }
         if var data = contents[inode.rawValue] {
             let target = Int(length)
             if data.count > target {
@@ -412,6 +435,14 @@ public actor GCSFEngine: FileSystemEngine {
     }
 
     public func synchronize() async throws {
+        if let journal {
+            do {
+                try await journal.synchronize()
+            } catch let error as POSIXError {
+                throw EngineError.posix(error.code.rawValue)
+            }
+            return
+        }
         var pending = [Self.root]
         var seen: Set<UInt64> = []
         while let inode = pending.popLast() {
@@ -681,6 +712,179 @@ public actor GCSFEngine: FileSystemEngine {
             data.append(Data(count: target - data.count))
         }
         return data
+    }
+
+    private func journalWrite(
+        _ journal: SQLiteWritebackJournal,
+        record: MetadataRecord,
+        bytes: Data,
+        offset: Int64
+    ) async throws {
+        let path = stagedName(record.inode)
+        let id = journalID(record.inode)
+        let existed = try await journal.record(id: id) != nil
+        if !existed {
+            try await journal.truncateStaged(relativePath: path, to: 0)
+            let covers = offset == 0 && Int64(bytes.count) >= record.size
+            if !covers {
+                try await seed(journal, record: record, path: path)
+            }
+        }
+        if bytes.isEmpty {
+            let size = try stagedSize(path)
+            if offset > size {
+                try await journal.truncateStaged(relativePath: path, to: offset)
+            }
+        } else {
+            try await journal.writeStaged(relativePath: path, at: offset, bytes: bytes)
+        }
+        let size = try stagedSize(path)
+        try await commitJournal(journal, record: record, id: id, path: path, size: size, existed: existed)
+    }
+
+    private func journalTruncate(
+        _ journal: SQLiteWritebackJournal,
+        record: MetadataRecord,
+        length: Int64
+    ) async throws {
+        let path = stagedName(record.inode)
+        let id = journalID(record.inode)
+        let existed = try await journal.record(id: id) != nil
+        if !existed {
+            try await journal.truncateStaged(relativePath: path, to: 0)
+            if length > 0, record.size > 0 {
+                try await seed(journal, record: record, path: path)
+            }
+        }
+        try await journal.truncateStaged(relativePath: path, to: length)
+        try await commitJournal(journal, record: record, id: id, path: path, size: length, existed: existed)
+    }
+
+    private func seed(_ journal: SQLiteWritebackJournal, record: MetadataRecord, path: String) async throws {
+        let size = record.size
+        if size <= 0 {
+            return
+        }
+        var offset: Int64 = 0
+        let chunk = 65_536
+        while offset < size {
+            let length = Int(min(Int64(chunk), size - offset))
+            let bytes = try await seedChunk(record, offset: offset, length: length)
+            guard bytes.count == length else {
+                throw EngineError.posix(EIO)
+            }
+            try await journal.writeStaged(relativePath: path, at: offset, bytes: bytes)
+            offset += Int64(length)
+        }
+    }
+
+    private func seedChunk(_ record: MetadataRecord, offset: Int64, length: Int) async throws -> Data {
+        guard let driveID = record.driveID else {
+            return Data(count: length)
+        }
+        let downloaded = try await drive.downloadContent(
+            id: driveID,
+            range: ByteRange(offset: offset, length: length)
+        )
+        var bytes = sliceContent(downloaded, offset: offset, length: length, size: record.size)
+        if bytes.count < length {
+            bytes.append(Data(count: length - bytes.count))
+        }
+        return bytes
+    }
+
+    private func commitJournal(
+        _ journal: SQLiteWritebackJournal,
+        record: MetadataRecord,
+        id: JournalID,
+        path: String,
+        size: Int64,
+        existed: Bool
+    ) async throws {
+        if existed {
+            try await journal.setState(id: id, state: .journaled)
+        } else {
+            try await journal.insert(
+                JournalRecord(
+                    id: id,
+                    inode: record.inode,
+                    driveID: record.driveID,
+                    state: .journaled,
+                    headRevision: record.headRevision,
+                    stagedRelativePath: path,
+                    uploadSessionURI: nil
+                )
+            )
+        }
+        var updated = record
+        updated.size = size
+        updated.durability = .journaled
+        try await store.update(updated)
+    }
+
+    private func readJournaled(
+        _ journal: SQLiteWritebackJournal,
+        record: MetadataRecord,
+        offset: Int64,
+        length: Int
+    ) async throws -> Data {
+        guard let stagedDirectory else {
+            throw EngineError.posix(EIO)
+        }
+        guard let row = try await journal.record(id: journalID(record.inode)) else {
+            throw EngineError.posix(EIO)
+        }
+        guard offset < record.size else {
+            return Data()
+        }
+        let end = min(record.size, offset + Int64(length))
+        let wanted = end - offset
+        guard wanted <= Int64(Int.max) else {
+            throw EngineError.posix(EOVERFLOW)
+        }
+        let url = stagedDirectory.appending(path: row.stagedRelativePath)
+        do {
+            let handle = try FileHandle(forReadingFrom: url)
+            do {
+                try handle.seek(toOffset: UInt64(offset))
+                var data = try handle.read(upToCount: Int(wanted)) ?? Data()
+                try handle.close()
+                if data.count < Int(wanted) {
+                    data.append(Data(count: Int(wanted) - data.count))
+                }
+                return data
+            } catch {
+                try? handle.close()
+                throw error
+            }
+        } catch let error as EngineError {
+            throw error
+        } catch {
+            throw EngineError.posix(EIO)
+        }
+    }
+
+    private func stagedSize(_ path: String) throws -> Int64 {
+        guard let stagedDirectory else {
+            throw EngineError.posix(EIO)
+        }
+        let url = stagedDirectory.appending(path: path)
+        guard FileManager.default.fileExists(atPath: url.path) else {
+            return 0
+        }
+        let values = try url.resourceValues(forKeys: [.fileSizeKey])
+        guard let size = values.fileSize else {
+            throw EngineError.posix(EIO)
+        }
+        return Int64(size)
+    }
+
+    private func journalID(_ inode: Inode) -> JournalID {
+        JournalID(rawValue: String(inode.rawValue))
+    }
+
+    private func stagedName(_ inode: Inode) -> String {
+        String(inode.rawValue)
     }
 
     private func storeContent(_ data: Data, on record: MetadataRecord) async throws {

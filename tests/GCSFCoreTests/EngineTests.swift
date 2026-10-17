@@ -2,6 +2,7 @@ import Darwin
 import Foundation
 import Testing
 import GCSFCore
+import GCSFTestSupport
 
 @Suite struct EngineTests {
     @Test func reservedDirectoriesKeepTheirInodesAndNames() async throws {
@@ -436,6 +437,189 @@ import GCSFCore
         let calls = await harness.drive.snapshot()
         #expect(calls.downloaded == [MemoryDrive.Download(id: DriveID(rawValue: "remote"), offset: 2, length: 2)])
     }
+
+    @Test func journaledWriteUploadsOnlyOnSynchronize() async throws {
+        let harness = try await JournalHarness.open()
+        let file = try await harness.engine.create(named: "notes", kind: .file, in: Harness.root)
+        let id = try #require(try await harness.store.record(inode: file.inode)?.driveID)
+        #expect(try await harness.engine.write(file.inode, bytes: Data("abcdef".utf8), at: 0) == 6)
+        #expect(try await harness.engine.read(file.inode, at: 2, length: 2) == Data("cd".utf8))
+        let pending = try await harness.journal.record(id: JournalID(rawValue: String(file.inode.rawValue)))
+        #expect(pending?.state == .journaled)
+        let staged = try #require(try await harness.store.record(inode: file.inode))
+        #expect(staged.durability == .journaled)
+        #expect(staged.size == 6)
+        #expect(try await harness.drive.downloadContent(id: id, range: nil).bytes.isEmpty)
+        #expect(try await harness.drive.getFile(id: id).headRevision == "1")
+        try await harness.engine.truncate(file.inode, to: 4)
+        #expect(try await harness.engine.read(file.inode, at: 0, length: 4) == Data("abcd".utf8))
+        try await harness.engine.synchronize()
+        #expect(try await harness.drive.downloadContent(id: id, range: nil).bytes == Data("abcd".utf8))
+        #expect(try await harness.drive.getFile(id: id).headRevision == "2")
+        #expect(try await harness.store.record(inode: file.inode)?.durability == .committed)
+        #expect(try await harness.journal.records().isEmpty)
+        #expect(try await harness.engine.write(file.inode, bytes: Data("Z".utf8), at: 2) == 1)
+        #expect(try await harness.engine.read(file.inode, at: 0, length: 6) == Data("abZd".utf8))
+        #expect(try await harness.drive.downloadContent(id: id, range: nil).bytes == Data("abcd".utf8))
+        try await harness.engine.synchronize()
+        #expect(try await harness.drive.downloadContent(id: id, range: nil).bytes == Data("abZd".utf8))
+        #expect(try await harness.drive.getFile(id: id).id == id)
+    }
+
+    @Test func changedHeadWritesAConflictCopy() async throws {
+        let harness = try await JournalHarness.open()
+        let file = try await harness.engine.create(named: "Report", kind: .file, in: Harness.root)
+        let id = try #require(try await harness.store.record(inode: file.inode)?.driveID)
+        #expect(try await harness.engine.write(file.inode, bytes: Data("one".utf8), at: 0) == 3)
+        try await harness.engine.synchronize()
+        let remote = Data("two".utf8)
+        _ = try await harness.drive.multipartUpload(
+            MultipartUploadIntent(
+                existingFileID: id,
+                metadata: DriveFileCreate(name: "Report", mimeType: "application/octet-stream", parents: [DriveID(rawValue: "root")]),
+                mimeType: "application/octet-stream",
+                body: remote
+            )
+        )
+        #expect(try await harness.engine.write(file.inode, bytes: Data("three".utf8), at: 0) == 5)
+        #expect(try await harness.engine.read(file.inode, at: 0, length: 5) == Data("three".utf8))
+        try await harness.engine.synchronize()
+        let original = try await harness.drive.getFile(id: id)
+        #expect(original.id == id)
+        #expect(original.headRevision == "3")
+        #expect(try await harness.drive.downloadContent(id: id, range: nil).bytes == remote)
+        let copies = try await harness.drive.listFiles(query: "'root' in parents", pageToken: nil, pageSize: nil)
+            .files
+            .filter { $0.name == "Report.gcsf-conflict-\(id.rawValue)" }
+        let copy = try #require(copies.first)
+        #expect(copy.id != id)
+        #expect(try await harness.drive.downloadContent(id: copy.id, range: nil).bytes == Data("three".utf8))
+        let stored = try #require(try await harness.store.record(inode: file.inode))
+        #expect(stored.driveID == id)
+        #expect(stored.durability == .conflicted)
+    }
+
+    @Test func journaledBackendFailureLeavesTheJournal() async throws {
+        let harness = try await JournalHarness.open()
+        let file = try await harness.engine.create(named: "notes", kind: .file, in: Harness.root)
+        let id = try #require(try await harness.store.record(inode: file.inode)?.driveID)
+        #expect(try await harness.engine.write(file.inode, bytes: Data("ab".utf8), at: 0) == 2)
+        await harness.drive.arm(.serverError)
+        await #expect(throws: EngineError.posix(EIO)) {
+            try await harness.engine.synchronize()
+        }
+        let row = try await harness.journal.record(id: JournalID(rawValue: String(file.inode.rawValue)))
+        #expect(row?.state == .journaled)
+        #expect(try await harness.store.record(inode: file.inode)?.durability == .journaled)
+        #expect(try await harness.drive.downloadContent(id: id, range: nil).bytes.isEmpty)
+        #expect(try await harness.engine.read(file.inode, at: 0, length: 2) == Data("ab".utf8))
+    }
+
+    @Test func journalRejectsReadOnlyAndNativeBeforeStaging() async throws {
+        let readOnly = try await JournalHarness.open(readOnly: true)
+        try await readOnly.insertFile(inode: 4, driveID: "file", name: "file")
+        await #expect(throws: EngineError.posix(EROFS)) {
+            _ = try await readOnly.engine.write(Inode(rawValue: 4), bytes: Data("x".utf8), at: 0)
+        }
+        await #expect(throws: EngineError.posix(EROFS)) {
+            try await readOnly.engine.truncate(Inode(rawValue: 4), to: 0)
+        }
+        #expect(try await readOnly.journal.records().isEmpty)
+        #expect(try stagedFiles(readOnly.staging).isEmpty)
+
+        let native = try await JournalHarness.open()
+        let document = try #require(
+            try await native.engine.incorporate(
+                [incoming("doc", name: "Doc", mime: "application/vnd.google-apps.document")],
+                under: Harness.root
+            ).first
+        )
+        await #expect(throws: EngineError.posix(EROFS)) {
+            _ = try await native.engine.write(document.inode, bytes: Data("x".utf8), at: 0)
+        }
+        await #expect(throws: EngineError.posix(EROFS)) {
+            try await native.engine.truncate(document.inode, to: 0)
+        }
+        #expect(try await native.journal.records().isEmpty)
+        #expect(try stagedFiles(native.staging).isEmpty)
+    }
+
+    @Test func sessionFactoryRequiresConfigAndTokenBeforeCreatingFiles() async throws {
+        let missing = try sessionContainer("missing-config")
+        await #expect(throws: POSIXError(.ENXIO)) {
+            _ = try await LiveSession.make(
+                session: "primary",
+                container: missing,
+                tokens: MemoryTokens("refresh"),
+                backend: FakeDrive()
+            )
+        }
+        #expect(FileManager.default.fileExists(atPath: missing.path) == false)
+
+        let container = try sessionContainer("missing-token")
+        try DriveSettingsStore.save(DriveSettings(), container: container)
+        await #expect(throws: POSIXError(.ENXIO)) {
+            _ = try await LiveSession.make(
+                session: "primary",
+                container: container,
+                tokens: MemoryTokens(nil),
+                backend: FakeDrive()
+            )
+        }
+        #expect(FileManager.default.fileExists(atPath: ContainerFiles.index(container).path) == false)
+        #expect(FileManager.default.fileExists(atPath: ContainerFiles.journal(container).path) == false)
+        #expect(FileManager.default.fileExists(atPath: ContainerFiles.staged(container).path) == false)
+    }
+
+    @Test func sessionFactoryWiresSettingsJournalAndBackend() async throws {
+        let container = try sessionContainer("wired")
+        try DriveSettingsStore.save(DriveSettings(addExtensionsToSpecialFiles: true), container: container)
+        let backend = FakeDrive()
+        let engine = try await LiveSession.make(
+            session: "primary",
+            container: container,
+            tokens: MemoryTokens("refresh"),
+            backend: backend
+        )
+        let document = try #require(
+            try await engine.incorporate(
+                [incoming("doc", name: "Doc", mime: "application/vnd.google-apps.document")],
+                under: Harness.root
+            ).first
+        )
+        #expect(document.name == "Doc#.odt")
+        let remote = try await backend.createFile(
+            metadata: DriveFileCreate(name: "n", mimeType: "text/plain", parents: [])
+        )
+        let file = try #require(
+            try await engine.incorporate(
+                [
+                    EngineIncoming(
+                        driveID: remote.id,
+                        name: "n",
+                        mimeType: "text/plain",
+                        size: 0,
+                        created: nil,
+                        modified: nil,
+                        headRevision: "1",
+                        md5: nil,
+                        sha1: nil,
+                        sha256: nil,
+                        owner: nil,
+                        webLink: nil,
+                        trashed: false
+                    ),
+                ],
+                under: Harness.root
+            ).first
+        )
+        #expect(try await engine.write(file.inode, bytes: Data("hi".utf8), at: 0) == 2)
+        #expect(try await backend.downloadContent(id: remote.id, range: nil).bytes.isEmpty)
+        try await engine.synchronize()
+        #expect(try await backend.downloadContent(id: remote.id, range: nil).bytes == Data("hi".utf8))
+        #expect(try await backend.getFile(id: remote.id).id == remote.id)
+        #expect(FileManager.default.fileExists(atPath: ContainerFiles.index(container).path))
+    }
 }
 
 private struct Harness {
@@ -544,6 +728,93 @@ private func scratchPath(_ name: String) throws -> String {
     let directory = URL(fileURLWithPath: "/Users/josh/d/gcsf/.work/tmp/e2", isDirectory: true)
     try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
     return directory.appending(path: "\(name)-\(UUID().uuidString).sqlite").path
+}
+
+private struct JournalHarness {
+    let engine: GCSFEngine
+    let store: SQLiteMetadataStore
+    let drive: FakeDrive
+    let journal: SQLiteWritebackJournal
+    let staging: URL
+
+    static func open(readOnly: Bool = false) async throws -> JournalHarness {
+        let directory = try sessionContainer("journal")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let store = try SQLiteMetadataStore(path: directory.appending(path: "index.sqlite").path)
+        var root = try #require(try await store.record(inode: Harness.root))
+        root.driveID = DriveID(rawValue: "root")
+        try await store.update(root)
+        let drive = FakeDrive()
+        let staging = directory.appending(path: "staged", directoryHint: .isDirectory)
+        let journal = try SQLiteWritebackJournal(
+            path: directory.appending(path: "journal.sqlite").path,
+            stagingDirectory: staging,
+            metadata: store,
+            backend: drive
+        )
+        let engine = GCSFEngine(
+            store: store,
+            drive: drive,
+            configuration: Harness.configuration(readOnly: readOnly),
+            journal: journal,
+            stagedDirectory: staging
+        )
+        return JournalHarness(engine: engine, store: store, drive: drive, journal: journal, staging: staging)
+    }
+
+    func insertFile(inode: UInt64, driveID: String, name: String) async throws {
+        try await store.insert(
+            MetadataRecord(
+                inode: Inode(rawValue: inode),
+                driveID: DriveID(rawValue: driveID),
+                parent: Harness.root,
+                name: name,
+                assignedDuplicateSuffix: nil,
+                mimeType: "text/plain",
+                size: 4,
+                created: nil,
+                modified: nil,
+                headRevision: "1",
+                md5: nil,
+                sha1: nil,
+                sha256: nil,
+                owner: nil,
+                webLink: nil,
+                durability: .committed,
+                trashed: false
+            )
+        )
+    }
+}
+
+private actor MemoryTokens: RefreshTokenStore {
+    private let stored: String?
+
+    init(_ stored: String?) {
+        self.stored = stored
+    }
+
+    func load(session _: String) async throws -> String? {
+        stored
+    }
+
+    func store(session _: String, refreshToken _: String) async throws {}
+
+    func remove(session _: String) async throws {}
+}
+
+private func sessionContainer(_ name: String) throws -> URL {
+    let root = URL(fileURLWithPath: "/Users/josh/d/gcsf/.work/tmp/wire", isDirectory: true)
+    let directory = root.appending(path: "\(name)-\(UUID().uuidString)", directoryHint: .isDirectory)
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    return directory
+}
+
+private func stagedFiles(_ directory: URL) throws -> [URL] {
+    guard FileManager.default.fileExists(atPath: directory.path) else {
+        return []
+    }
+    return try FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)
 }
 
 private actor MemoryDrive: DriveBackend {
