@@ -77,7 +77,8 @@ public enum GCSFCommandLine {
     usage: gcsf <command>
 
     commands:
-      login <session>
+      setup [client.json]
+      login [session]
       logout <session>
       list
       verify <session>
@@ -94,6 +95,8 @@ public enum GCSFCommandLine {
         }
         let rest = Array(args.dropFirst())
         switch command {
+        case "setup":
+            return setup(rest, environment: environment)
         case "login":
             return login(rest, environment: environment)
         case "logout":
@@ -111,8 +114,47 @@ public enum GCSFCommandLine {
         }
     }
 
+    public static let defaultSession = "default"
+
+    private static let setupPage = URL(string: "https://console.cloud.google.com/apis/library/drive.googleapis.com")!
+
+    private static let setupUsage = """
+    usage: gcsf setup [client.json]
+
+    """
+
+    private static let setupGuide = """
+    usage: gcsf setup [client.json]
+
+    Google blocks the shared Drive client. Create a Desktop client in your own Cloud project.
+    The browser opened \(setupPage.absoluteString).
+
+    1. Select a project, or create one. On the page that opened, click Enable for the Google Drive API.
+
+    2. Open https://console.cloud.google.com/auth/overview. Click Get started when that button is shown.
+
+    3. Branding. Set the app name to gcsf. Set the user support email to your email. Save.
+
+    4. Audience. Choose External. Leave the publishing status on Testing. Under Test users, add the Google account you will sign in with. Save. Do not publish. An unverified published app is blocked again.
+
+    5. Data Access. Add a scope and paste this value:
+       https://www.googleapis.com/auth/drive
+       Save. The scope list hides this scope. Paste it.
+
+    6. Clients. Create a client. Choose the application type Desktop app. Name it gcsf. Create it, then download the JSON file. A Web application client rejects the local redirect.
+
+    7. Install that file, then sign in:
+       gcsf setup ~/Downloads/client_secret_….json
+       gcsf login
+
+    While the app stays in Testing, Google expires the refresh token after 7 days. Run gcsf login again when verify fails.
+    gcsf setup <client.json> replaces the saved client. Existing session names stay.
+    gcsf login before this step uses the shared client, and Google shows "This app is blocked".
+
+    """
+
     private static let loginUsage = """
-    usage: gcsf login <session>
+    usage: gcsf login [session]
 
     """
 
@@ -142,8 +184,76 @@ public enum GCSFCommandLine {
 
     """
 
+    private static func setup(_ args: [String], environment: GCSFCommandEnvironment) -> GCSFCommandResult {
+        if args.isEmpty {
+            let box = Mutex<Bool>(false)
+            let once = OnceReply<Bool>()
+            Task {
+                await environment.openBrowser(setupPage)
+                once.send(true) { opened in
+                    box.withLock { $0 = opened }
+                }
+            }
+            while box.withLock({ $0 == false }) {
+                RunLoop.current.run(mode: .default, before: Date(timeIntervalSinceNow: 0.05))
+            }
+            return GCSFCommandResult(code: 0, out: setupGuide, err: "")
+        }
+        guard args.count == 1, let path = args.first, path.isEmpty == false, path.hasPrefix("-") == false else {
+            return GCSFCommandResult(code: 2, out: "", err: setupUsage)
+        }
+        return installClient(path: path, environment: environment)
+    }
+
+    private static func installClient(path: String, environment: GCSFCommandEnvironment) -> GCSFCommandResult {
+        let file = URL(fileURLWithPath: path)
+        let document: String
+        do {
+            document = try String(contentsOf: file, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines)
+        } catch {
+            return GCSFCommandResult(code: 1, out: "", err: "setup: cannot read \(path)\n")
+        }
+        let client: OAuthClient
+        do {
+            client = try OAuthClient(document: document)
+        } catch {
+            return GCSFCommandResult(
+                code: 1,
+                out: "",
+                err: "setup: \(path) is not a Desktop client JSON file. In Clients, the application type is Desktop app.\n"
+            )
+        }
+        if let shipped = try? OAuthClient(document: OAuthDrive.shippedClientDocument), client.id == shipped.id {
+            return GCSFCommandResult(
+                code: 1,
+                out: "",
+                err: "setup: Google blocks this shared client. Create a Desktop client in your own project.\n"
+            )
+        }
+        let container = RuntimeBoundary.groupContainerURL(home: environment.home)
+        var settings: DriveSettings
+        do {
+            settings = try DriveSettingsStore.load(container: container)
+        } catch DriveSettingsError.missing {
+            settings = DriveSettings(authPort: 0)
+        } catch {
+            return GCSFCommandResult(code: 1, out: "", err: "setup: \(publicMessage(error))\n")
+        }
+        settings.clientSecret = document
+        do {
+            try DriveSettingsStore.save(settings, container: container)
+        } catch {
+            return GCSFCommandResult(code: 1, out: "", err: "setup: failed to save the client\n")
+        }
+        return GCSFCommandResult(
+            code: 0,
+            out: "saved Desktop client \(client.id)\nrun gcsf login\n",
+            err: ""
+        )
+    }
+
     private static func login(_ args: [String], environment: GCSFCommandEnvironment) -> GCSFCommandResult {
-        guard let session = sessionArgument(args) else {
+        guard let session = loginSession(args) else {
             return GCSFCommandResult(code: 2, out: "", err: loginUsage)
         }
         return run("login") {
@@ -223,7 +333,16 @@ public enum GCSFCommandLine {
 
     private static func performLogin(session: String, environment: GCSFCommandEnvironment) async throws {
         let container = RuntimeBoundary.groupContainerURL(home: environment.home)
-        var settings = try await loadSettings(environment: environment)
+        var settings: DriveSettings
+        do {
+            settings = try await loadSettings(environment: environment)
+        } catch DriveSettingsError.missing {
+            settings = DriveSettings(authPort: 0)
+        }
+        if settings.clientSecret?.isEmpty != false {
+            settings.clientSecret = OAuthDrive.shippedClientDocument
+            try DriveSettingsStore.save(settings, container: container)
+        }
         guard let document = settings.clientSecret, document.isEmpty == false else {
             throw OAuthError.invalidClientDocument
         }
@@ -337,6 +456,13 @@ public enum GCSFCommandLine {
         }
         guard let session, positionals.isEmpty else { return nil }
         return session
+    }
+
+    private static func loginSession(_ args: [String]) -> String? {
+        if args.isEmpty {
+            return defaultSession
+        }
+        return sessionArgument(args)
     }
 
     private static func sessionArgument(_ args: [String]) -> String? {

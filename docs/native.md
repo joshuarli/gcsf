@@ -4,9 +4,11 @@ The product is implementation-incomplete. Nothing here has mounted a volume. A s
 
 ## Commands
 
-`gcsf --help` lists `login`, `logout`, `list`, `verify`, `mount`, and `umount`.
+`gcsf --help` lists `setup`, `login`, `logout`, `list`, `verify`, `mount`, and `umount`.
 
-`gcsf login <session>` requires the session name. Omitting it is a usage error and exits 2. It loads `config.json` from the group container for that home. When the file is missing and the legacy config directory contains `gcsf.toml`, it migrates that directory first. It then runs the OAuth login, adds the session name to `DriveSettings.sessions`, and saves. It does not print the refresh token or the access token. Success exits 0.
+`gcsf setup` opens `https://console.cloud.google.com/apis/library/drive.googleapis.com` and prints the steps that create a Desktop OAuth client for `https://www.googleapis.com/auth/drive`. `gcsf setup <client.json>` reads that downloaded file, checks that it is an installed Desktop client, and saves it as `DriveSettings.clientSecret`. A missing config is created with `authPort` 0. An existing config keeps its other fields, including session names. A Web client document and the shipped shared client are refused and exit 1. Extra arguments exit 2.
+
+`gcsf login` opens the Google sign-in page for the session `default`. `gcsf login <session>` uses that name instead. It loads `config.json` from the group container for that home. When the file is missing and the legacy config directory contains `gcsf.toml`, it migrates that directory first. When no client document exists, it uses the shipped Drive client. It then runs the OAuth login, adds the session name to `DriveSettings.sessions`, and saves. It does not print the refresh token or the access token. Success exits 0. Two arguments are a usage error and exit 2.
 
 `gcsf logout <session>` deletes the refresh token and removes the session name. A missing session exits 1.
 
@@ -32,9 +34,7 @@ The product is implementation-incomplete. Nothing here has mounted a volume. A s
 
 Config will be `config.json` in the group container named in [docs/runtime-contract.md](runtime-contract.md). The encoding is JSON.
 
-The OAuth client document is migrated, not replaced. Refresh tokens are keychain items, not files.
-
-`login` loads `config.json` from the group container and, when that file is missing, migrates `gcsf.toml` from the legacy config directory. The access group, the container, migration, and the index, journal, cache, and staging paths are in the runtime contract. This page does not restate them.
+Refresh tokens are keychain items, not files. When `config.json` is missing and the legacy directory contains `gcsf.toml`, login migrates that client document. When no client document exists, login writes the shipped Drive client. The access group, the container, and the index, journal, cache, and staging paths are in the runtime contract. This page does not restate them.
 
 ## Google-native documents
 

@@ -105,6 +105,9 @@ public enum OAuthDrive {
     public static let authorizationEndpoint = URL(string: "https://accounts.google.com/o/oauth2/auth")!
     public static let tokenEndpoint = URL(string: "https://oauth2.googleapis.com/token")!
     public static let scope = "https://www.googleapis.com/auth/drive"
+    public static let shippedClientDocument = """
+    {"installed":{"client_id":"892276709198-2ksebnrqkhihtf5p743k4ce5bk0n7p5a.apps.googleusercontent.com","client_secret":"1ImxorJzh-PuHCxrcLPnJMU"}}
+    """
 
     public static func redirectURI(port: UInt16) -> String {
         "http://127.0.0.1:\(port)/"

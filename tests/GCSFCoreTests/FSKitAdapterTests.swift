@@ -353,67 +353,146 @@ import Testing
         )
         try DriveSettingsStore.save(settings, container: container)
         let noSession = GCSFCommandLine.execute(["login"], environment: environment)
-        #expect(noSession.code == 2)
-        #expect(seen.withLock { $0.isEmpty })
-        #expect(server.count == 0)
+        #expect(noSession.code == 0)
+        #expect(secretFree(noSession))
+        #expect(seen.withLock { $0.count } == 1)
+        #expect(tokens.snapshot()[GCSFCommandLine.defaultSession] == "refresh-login")
+        #expect(GCSFCommandLine.execute(["login", "work", "extra"], environment: environment).code == 2)
         #expect(GCSFCommandLine.execute(["list", "extra"], environment: environment).code == 2)
         let listed = GCSFCommandLine.execute(["list"], environment: environment)
         #expect(listed.code == 0)
-        #expect(listed.out == "alpha\nzeta\n")
+        #expect(listed.out == "alpha\n\(GCSFCommandLine.defaultSession)\nzeta\n")
         let missingToken = GCSFCommandLine.execute(["verify", "alpha"], environment: environment)
         #expect(missingToken.code == 1)
-        #expect(server.count == 0)
+        #expect(server.count == 1)
         #expect(secretFree(missingToken))
         #expect(GCSFCommandLine.execute(["verify"], environment: environment).code == 2)
         let logged = GCSFCommandLine.execute(["login", "work"], environment: environment)
         #expect(logged.code == 0)
         #expect(secretFree(logged))
-        #expect(tokens.snapshot() == ["work": "refresh-login"])
+        #expect(tokens.snapshot() == [
+            GCSFCommandLine.defaultSession: "refresh-login",
+            "work": "refresh-login",
+        ])
         let loaded = try DriveSettingsStore.load(container: container)
-        #expect(loaded.sessions == ["alpha", "work", "zeta"])
+        #expect(loaded.sessions == ["alpha", GCSFCommandLine.defaultSession, "work", "zeta"])
         let configText = try String(contentsOf: DriveSettingsStore.fileURL(container: container), encoding: .utf8)
         #expect(configText.contains("refresh-login") == false)
         #expect(configText.contains("access-login") == false)
         #expect(configText.contains("refresh-beta") == false)
         #expect(FileManager.default.fileExists(atPath: legacy.appending(path: "beta").path))
         let urls = seen.withLock { $0 }
-        #expect(urls.count == 1)
+        #expect(urls.count == 2)
         #expect(urls.first?.host == "accounts.google.com")
         let verified = GCSFCommandLine.execute(["verify", "work"], environment: environment)
         #expect(verified.code == 0)
         #expect(secretFree(verified))
-        #expect(server.count == 2)
+        #expect(server.count == 3)
         let loggedOut = GCSFCommandLine.execute(["logout", "work"], environment: environment)
         #expect(loggedOut.code == 0)
         #expect(tokens.snapshot()["work"] == nil)
-        #expect(try DriveSettingsStore.load(container: container).sessions == ["alpha", "zeta"])
+        #expect(try DriveSettingsStore.load(container: container).sessions == ["alpha", GCSFCommandLine.defaultSession, "zeta"])
         #expect(GCSFCommandLine.execute(["logout", "work"], environment: environment).code == 1)
         #expect(GCSFCommandLine.execute(["logout"], environment: environment).code == 2)
         let gone = GCSFCommandLine.execute(["verify", "work"], environment: environment)
         #expect(gone.code == 1)
         #expect(secretFree(gone))
-        #expect(server.count == 2)
+        #expect(server.count == 3)
         let again = GCSFCommandLine.execute(["list"], environment: environment)
-        #expect(again.out == "alpha\nzeta\n")
+        #expect(again.out == "alpha\n\(GCSFCommandLine.defaultSession)\nzeta\n")
+    }
+
+    @Test func setupOpensTheDriveAPIPageAndInstallsADesktopClient() throws {
+        let home = scratchHome()
+        defer { try? FileManager.default.removeItem(at: home) }
+        let seen = Mutex<[URL]>([])
+        let environment = commandEnvironment(
+            home: home,
+            openBrowser: { url in
+                seen.withLock { $0.append(url) }
+            }
+        )
+        let guided = GCSFCommandLine.execute(["setup"], environment: environment)
+        #expect(guided.code == 0)
+        #expect(guided.err.isEmpty)
+        #expect(guided.out.contains("https://console.cloud.google.com/apis/library/drive.googleapis.com"))
+        #expect(guided.out.contains("https://console.cloud.google.com/auth/overview"))
+        #expect(guided.out.contains("https://www.googleapis.com/auth/drive"))
+        #expect(guided.out.contains("Desktop app"))
+        #expect(seen.withLock { $0.map(\.absoluteString) } == [
+            "https://console.cloud.google.com/apis/library/drive.googleapis.com"
+        ])
+        #expect(GCSFCommandLine.execute(["setup", "one", "two"], environment: environment).code == 2)
+        let container = RuntimeBoundary.groupContainerURL(home: home)
+        try DriveSettingsStore.save(
+            DriveSettings(clientSecret: "old", authPort: 9, sessions: ["alpha"]),
+            container: container
+        )
+        let document = """
+        {"installed":{"client_id":"cid.apps.googleusercontent.com","client_secret":"csec","project_id":"p"}}
+        """
+        let file = home.appending(path: "client.json")
+        try document.write(to: file, atomically: true, encoding: .utf8)
+        let installed = GCSFCommandLine.execute(["setup", file.path], environment: environment)
+        #expect(installed.code == 0)
+        #expect(installed.out == "saved Desktop client cid.apps.googleusercontent.com\nrun gcsf login\n")
+        #expect(installed.out.contains("csec") == false)
+        #expect(seen.withLock { $0.count } == 1)
+        let loaded = try DriveSettingsStore.load(container: container)
+        #expect(loaded.clientSecret == document)
+        #expect(loaded.sessions == ["alpha"])
+        #expect(loaded.authPort == 9)
+        let web = home.appending(path: "web.json")
+        try "{\"web\":{\"client_id\":\"w\",\"client_secret\":\"s\"}}".write(to: web, atomically: true, encoding: .utf8)
+        let rejected = GCSFCommandLine.execute(["setup", web.path], environment: environment)
+        #expect(rejected.code == 1)
+        #expect(try DriveSettingsStore.load(container: container).clientSecret == document)
+        let shared = home.appending(path: "shared.json")
+        try OAuthDrive.shippedClientDocument.write(to: shared, atomically: true, encoding: .utf8)
+        let blocked = GCSFCommandLine.execute(["setup", shared.path], environment: environment)
+        #expect(blocked.code == 1)
+        #expect(blocked.err.contains("shared client"))
+        #expect(try DriveSettingsStore.load(container: container).clientSecret == document)
+        let missing = GCSFCommandLine.execute(["setup", home.appending(path: "missing.json").path], environment: environment)
+        #expect(missing.code == 1)
+    }
+
+    @Test func loginWithNoArgumentsOpensTheBrowser() throws {
+        let home = scratchHome()
+        defer { try? FileManager.default.removeItem(at: home) }
+        let tokens = CommandMemoryTokens()
+        let seen = Mutex<[URL]>([])
+        let server = try CommandTokenServer { _ in
+            (200, "{\"access_token\":\"access-login\",\"refresh_token\":\"refresh-login\",\"expires_in\":60}")
+        }
+        defer { server.stop() }
+        let environment = commandEnvironment(
+            home: home,
+            tokens: tokens,
+            tokenEndpoint: server.endpoint,
+            openBrowser: { url in
+                seen.withLock { $0.append(url) }
+                await commandCallback(auth: url, code: "auth-code")
+            }
+        )
+        let logged = GCSFCommandLine.execute(["login"], environment: environment)
+        #expect(logged.code == 0)
+        #expect(secretFree(logged))
+        #expect(tokens.snapshot()[GCSFCommandLine.defaultSession] == "refresh-login")
+        let container = RuntimeBoundary.groupContainerURL(home: home)
+        let loaded = try DriveSettingsStore.load(container: container)
+        #expect(loaded.sessions == [GCSFCommandLine.defaultSession])
+        #expect(loaded.clientSecret == OAuthDrive.shippedClientDocument)
+        let urls = seen.withLock { $0 }
+        #expect(urls.count == 1)
+        #expect(urls.first?.host == "accounts.google.com")
     }
 
     @Test func loginMigratesWhenConfigIsMissing() throws {
         let home = scratchHome()
         let legacy = home.appending(path: "legacy", directoryHint: .isDirectory)
         defer { try? FileManager.default.removeItem(at: home) }
-        let early = Mutex(0)
-        let withoutLegacy = commandEnvironment(
-            home: home,
-            legacyConfigDirectory: legacy,
-            openBrowser: { _ in
-                early.withLock { $0 += 1 }
-            }
-        )
-        let blocked = GCSFCommandLine.execute(["login", "work"], environment: withoutLegacy)
-        #expect(blocked.code == 1)
-        #expect(early.withLock { $0 } == 0)
         let container = RuntimeBoundary.groupContainerURL(home: home)
-        #expect(FileManager.default.fileExists(atPath: DriveSettingsStore.fileURL(container: container).path) == false)
         try FileManager.default.createDirectory(at: legacy, withIntermediateDirectories: true)
         let secret = "{\"installed\":{\"client_id\":\"cid\",\"client_secret\":\"csec\"}}"
         let toml = """
