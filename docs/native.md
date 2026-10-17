@@ -46,7 +46,7 @@ Google-native documents are read-only. Docs, Sheets, Slides, Drawings, and Sites
 
 The states are `staged`, `journaled`, `committed`, and `conflicted`.
 
-The extension process still uses `DisconnectedEngine`, which refuses every operation with `ENXIO`. It does not open the index, the journal, or Drive.
+The appex builds `LiveSession`, which opens the index, the journal, and Drive from the group container. A missing `config.json` or refresh token fails with `ENXIO` and creates no files. The first write of an existing file copies that file into the staging directory in 64 KiB chunks. No change-feed loop is started. No mount has been demonstrated.
 
 ## Names
 

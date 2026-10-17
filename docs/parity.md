@@ -1,6 +1,8 @@
 # Parity
 
-Level 1 is FakeDrive or the index. Level 2 is DriveClientTests. Level 3 is the signed mount and is unverified. A level 3 row names a category in `tests/integration/test_filesystem_operations.sh`. It is not a result. The engine is not in this map.
+Level 1 is FakeDrive, the index, the engine, the cache, the journal, or the change feed. Level 2 is DriveClientTests and AuthTests. Level 3 is the signed mount and is unverified. A level 3 row names a category in `tests/integration/test_filesystem_operations.sh`. It is not a result.
+
+Later suites are level 1 unless named here: EngineTests, CacheTests, WritebackTests, SyncTests, AdversarialTests, and the session commands in FSKitAdapterTests. AuthTests and ConfigTests are level 2. They are not a kernel mount.
 
 | behavior | test | level |
 | --- | --- | --- |
