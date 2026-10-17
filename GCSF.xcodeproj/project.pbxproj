@@ -8,6 +8,7 @@
 
 /* Begin PBXBuildFile section */
 		A10000000000000000000011 /* GCSFExtension.appex in Embed ExtensionKit Extensions */ = {isa = PBXBuildFile; fileRef = A10000000000000000000005 /* GCSFExtension.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
+		A10000000000000000000022 /* GCSFCore in Frameworks */ = {isa = PBXBuildFile; productRef = A10000000000000000000021 /* GCSFCore */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -89,6 +90,7 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				A10000000000000000000022 /* GCSFCore in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -154,6 +156,9 @@
 				A10000000000000000000007 /* Extension */,
 			);
 			name = GCSFExtension;
+			packageProductDependencies = (
+				A10000000000000000000021 /* GCSFCore */,
+			);
 			productName = GCSFExtension;
 			productReference = A10000000000000000000005 /* GCSFExtension.appex */;
 			productType = "com.apple.product-type.extensionkit-extension";
@@ -188,12 +193,30 @@
 			productRefGroup = A10000000000000000000009 /* Products */;
 			projectDirPath = "";
 			projectRoot = "";
+			packageReferences = (
+				A10000000000000000000020 /* XCLocalSwiftPackageReference "." */,
+			);
 			targets = (
 				A10000000000000000000002 /* GCSFHost */,
 				A10000000000000000000003 /* GCSFExtension */,
 			);
 		};
 /* End PBXProject section */
+
+/* Begin XCLocalSwiftPackageReference section */
+		A10000000000000000000020 /* XCLocalSwiftPackageReference "." */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = .;
+		};
+/* End XCLocalSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		A10000000000000000000021 /* GCSFCore */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = A10000000000000000000020 /* XCLocalSwiftPackageReference "." */;
+			productName = GCSFCore;
+		};
+/* End XCSwiftPackageProductDependency section */
 
 /* Begin PBXResourcesBuildPhase section */
 		A1000000000000000000000E /* Resources */ = {

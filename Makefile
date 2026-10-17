@@ -1,6 +1,6 @@
 TMPDIR := /Users/josh/d/gcsf/.work/tmp
-DD := /Users/josh/d/gcsf/.work/tmp/f0-dd
-INSTALL := /Users/josh/d/gcsf/.work/tmp/f0-install
+DD := /Users/josh/d/gcsf/.work/tmp/f1-dd
+INSTALL := /Users/josh/d/gcsf/.work/tmp/f1-install
 export TMPDIR
 
 .PHONY: all build doctor test smoke install mount umount test-live clean
