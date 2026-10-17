@@ -54,7 +54,11 @@ public actor DriveClient: DriveBackend {
 
     public func listFiles(query: String?, pageToken: String?, pageSize: Int?) async throws -> DriveFilePage {
         let fields = "nextPageToken,files(\(Self.fileFields))"
-        var items = [URLQueryItem(name: "fields", value: fields)]
+        var items = [
+            URLQueryItem(name: "fields", value: fields),
+            URLQueryItem(name: "spaces", value: "drive"),
+            URLQueryItem(name: "corpora", value: "user"),
+        ]
         if let query {
             items.append(URLQueryItem(name: "q", value: query))
         }
@@ -252,6 +256,9 @@ public actor DriveClient: DriveBackend {
         var items = [
             URLQueryItem(name: "pageToken", value: pageToken),
             URLQueryItem(name: "fields", value: fields),
+            URLQueryItem(name: "spaces", value: "drive"),
+            URLQueryItem(name: "includeRemoved", value: "true"),
+            URLQueryItem(name: "restrictToMyDrive", value: "true"),
         ]
         if let pageSize {
             items.append(URLQueryItem(name: "pageSize", value: String(pageSize)))
@@ -272,10 +279,21 @@ public actor DriveClient: DriveBackend {
             self.jsonRequest(url: target, method: "GET", token: token, body: nil)
         }
         let object = try jsonObject(data, context: "about")
-        guard let root = object["rootFolderId"] as? String, !root.isEmpty else {
+        let email = try userEmail(object["user"])
+        if let root = try optionalString(object["rootFolderId"], context: "about"), !root.isEmpty {
+            return DriveAbout(rootFolderID: DriveID(rawValue: root), userEmail: email)
+        }
+        let rootTarget = try endpoint(
+            path: "/drive/v3/files/root",
+            query: [URLQueryItem(name: "fields", value: "id")]
+        )
+        let (_, rootData) = try await execute(acceptable: [200]) { token in
+            self.jsonRequest(url: rootTarget, method: "GET", token: token, body: nil)
+        }
+        let rootObject = try jsonObject(rootData, context: "root")
+        guard let root = try optionalString(rootObject["id"], context: "root"), !root.isEmpty else {
             throw DriveClientError.missingRootID
         }
-        let email = try userEmail(object["user"])
         return DriveAbout(rootFolderID: DriveID(rawValue: root), userEmail: email)
     }
 

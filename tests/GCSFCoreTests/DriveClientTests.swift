@@ -341,15 +341,21 @@ struct DriveClientTests {
     }
 
     @Test func aboutMissingRootUsesADedicatedRequest() async throws {
+        let recorder = RequestLog()
         let server = try FixtureServer { request in
-            #expect(request.path == "/drive/v3/about")
-            return FixtureResponse(status: 200, body: Data("{\"user\":{\"emailAddress\":\"u@example.com\"}}".utf8))
+            recorder.add(request)
+            if request.path == "/drive/v3/about" {
+                return FixtureResponse(status: 200, body: Data("{\"user\":{\"emailAddress\":\"u@example.com\"}}".utf8))
+            }
+            #expect(request.path == "/drive/v3/files/root")
+            #expect(request.query["fields"] == "id")
+            return FixtureResponse(status: 200, body: Data("{\"id\":\"root-from-files\"}".utf8))
         }
         defer { server.stop() }
         let client = makeClient(port: server.port, extraRetries: 0)
-        await #expect(throws: DriveClientError.missingRootID) {
-            try await client.about()
-        }
+        let about = try await client.about()
+        #expect(about == DriveAbout(rootFolderID: DriveID(rawValue: "root-from-files"), userEmail: "u@example.com"))
+        #expect(recorder.all().map(\.path) == ["/drive/v3/about", "/drive/v3/files/root"])
     }
 
     @Test func getFileMapsVersionFixtureAliasOntoHeadRevision() async throws {
