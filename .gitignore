@@ -1,3 +1,7 @@
 thesis/
 /target
 **/*.rs.bk
+.build
+DerivedData
+xcuserdata
+*.xcuserstate
