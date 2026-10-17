@@ -367,8 +367,6 @@ sync_interval = 60
 # Mount options
 mount_options = [
     "fsname=GCSF",
-    # Allow file system access to root. This only works if `user_allow_other`
-    # is set in /etc/fuse.conf
     "allow_root",
 ]
 
@@ -440,7 +438,6 @@ impl std::error::Error for MountFailure {
 }
 
 /// Path of the macFUSE kernel extension built for the running macOS release, if it exists.
-#[cfg(target_os = "macos")]
 fn macfuse_kext_path() -> Option<String> {
     let output = std::process::Command::new("/usr/bin/sw_vers")
         .arg("-productVersion")
@@ -455,7 +452,6 @@ fn macfuse_kext_path() -> Option<String> {
     Path::new(&path).exists().then_some(path)
 }
 
-#[cfg(target_os = "macos")]
 fn print_mount_troubleshooting() {
     let kext_path = macfuse_kext_path().unwrap_or_else(|| {
         String::from(
@@ -480,9 +476,6 @@ fn print_mount_troubleshooting() {
     eprintln!();
     eprintln!("Also make sure the mount point exists and is not already mounted.");
 }
-
-#[cfg(not(target_os = "macos"))]
-fn print_mount_troubleshooting() {}
 
 fn mount_gcsf(config: Config, mountpoint: &str) -> Result<(), Error> {
     let mount_config = config.fuser_config();

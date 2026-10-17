@@ -6,7 +6,7 @@ repository = "https://github.com/harababurel/gcsf"
 authors = ["Sergiu Puscas <srg.pscs@gmail.com>"]
 license = "MIT"
 keywords = ["google", "drive", "fuse", "filesystem"]
-exclude = ["build/**/*.o", "doc/**/*.html", "client_secret.json", "/ci/*"]
+exclude = ["build/**/*.o", "doc/**/*.html", "client_secret.json"]
 edition = "2024"
 
 
@@ -57,8 +57,3 @@ xdg = "3.0.0"
 # section once a fuser release fixes the issue. Note that `cargo publish` ignores it.
 [patch.crates-io]
 fuser = { git = "https://github.com/harababurel/fuser", rev = "3d6a8eccea86b89036e1e021e83ba88540863fc1" }
-
-# The profile that 'dist' will build with
-[profile.dist]
-inherits = "release"
-lto = "thin"

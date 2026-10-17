@@ -417,11 +417,7 @@ impl Filesystem for Gcsf {
         reply: ReplyEmpty,
     ) {
         reject_if_readonly!(self, reply);
-        #[cfg(target_os = "linux")]
-        let flags_supported = flags.is_empty() || flags == RenameFlags::RENAME_NOREPLACE;
-        #[cfg(not(target_os = "linux"))]
-        let flags_supported = flags.is_empty();
-        if !flags_supported {
+        if !flags.is_empty() {
             reply.error(Errno::EINVAL);
             return;
         }

@@ -26,44 +26,6 @@ On Mac OSX, GCSF requires [osxfuse](https://osxfuse.github.io/) and [pkg-config]
 $ brew update; brew install pkg-config; brew tap homebrew/cask; brew install --cask osxfuse
 ```
 
-#### Ubuntu / Debian
-
-On Ubuntu / Debian, GCSF requires [libfuse-dev](https://packages.ubuntu.com/disco/libfuse-dev), [libssl-dev](https://packages.ubuntu.com/disco/libssl-dev) and [pkg-config](https://packages.ubuntu.com/disco/pkg-config):
-
-```bash
-sudo apt-get install -y fuse3 libfuse-dev libssl-dev pkg-config
-```
-
-#### Fedora
-
-On Fedora, GCSF requires gcc, fuse3-devel, and pkg-config:
-
-```bash
-sudo dnf install -y gcc fuse3-devel pkg-config
-```
-
-#### Arch Linux
-
-An AUR package is maintained by [axionl](https://github.com/axionl): [gcsf-git](https://aur.archlinux.org/packages/gcsf-git/).
-
-#### SUSE
-
-```bash
-sudo zypper install -y fuse-devel fuse rust pkgconf-pkg-config
-```
-
-#### Other linux distros
-
-Make sure you have `pkg-config` and the `fuse` library installed. These are usually found in the package repositories of major distributions.
-
-#### FreeBSD
-
-Rust can be installed via the `lang/rust` port. You will need to install `sysutils/fusefs-libs` for the `cairo install` command to succeed.
-
-#### Windows
-
-Unfortunately, Windows is not supported at the time being. See issue [#19](https://github.com/harababurel/gcsf/issues/19).
-
 ### Installation
 
 After all requirements are met, GCSF can be installed using `cargo`:
@@ -142,14 +104,14 @@ Sessions:
 And then mount one (or more) of them:
 
 ```bash
-$ gcsf mount /mnt/gcsf -s some_session_name
+$ gcsf mount /Volumes/gcsf -s some_session_name
 INFO  gcsf > Creating and populating file system...
 INFO  gcsf > File system created.
-INFO  gcsf > Mounting to /mnt/gcsf
-INFO  gcsf > Mounted to /mnt/gcsf
+INFO  gcsf > Mounting to /Volumes/gcsf
+INFO  gcsf > Mounted to /Volumes/gcsf
 ```
 
-You can now find the contents of your Drive account in `/mnt/gcsf`:
+You can now find the contents of your Drive account in `/Volumes/gcsf`:
 
 <p align="left">
   <img src="https://i.imgur.com/jdFIu5Y.png" alt="GCSF ls"
@@ -182,7 +144,7 @@ GCSF exposes Drive metadata of every file and directory as extended attributes:
 | `user.gcsf.md5`, `user.gcsf.sha1`, `user.gcsf.sha256` | Checksums Drive computed for the file's content |
 | `user.gcsf.revision` | Id of the current content revision; changes whenever the content does |
 
-List them all with `getfattr -d /mnt/gcsf/some_file`, or `xattr -l` on macOS.
+List them all with `xattr -l /Volumes/gcsf/some_file`.
 
 Drive provides no checksums or revisions for directories and Google Docs, Sheets, Slides, Drawings and Sites, so these have no such attributes. Neither does a file with modifications that have not been flushed to Drive yet.
 
@@ -191,29 +153,17 @@ Drive provides no checksums or revisions for directories and Google Docs, Sheets
 The checksums let you verify a copy end to end against Drive, without reading the file through GCSF again:
 
 ```bash
-$ cp /mnt/gcsf/backup.zip /tmp/
-$ getfattr --only-values -n user.gcsf.md5 /mnt/gcsf/backup.zip; echo
+$ cp /Volumes/gcsf/backup.zip /tmp/
+$ xattr -p user.gcsf.md5 /Volumes/gcsf/backup.zip
 9e107d9d372bb6826bd81d3542a419d6
-$ md5sum /tmp/backup.zip
-9e107d9d372bb6826bd81d3542a419d6  /tmp/backup.zip
+$ md5 -q /tmp/backup.zip
+9e107d9d372bb6826bd81d3542a419d6
 ```
-
-On macOS, use `xattr -p user.gcsf.md5 /mnt/gcsf/backup.zip` instead of `getfattr`.
 
 ### Why GCSF?
 GCSF stands for "Google Conduce Sistem de Fișiere" which translated from Romanian is "Google Drive Filesystem". However [GDFS](https://github.com/robin-thomas/GDFS) already exists so it remains GCSF.
 
 ### Troubleshooting
-
-#### Could not mount to `$mountpoint`: Operation not permitted (os error 1)
-
-This error occurs when `user_allow_other` is not set in `/etc/fuse.conf` or the file has improper permissions. Fix by running (as root):
-
-```bash
-# echo 'user_allow_other' >> /etc/fuse.conf
-# chmod 644 /etc/fuse.conf
-# sudo chown root:root /etc/fuse.conf
-```
 
 #### macOS: Could not mount to `$mountpoint` (any error code)
 
@@ -229,10 +179,6 @@ If the macFUSE kernel extension has not been approved or loaded:
    sudo kmutil load -p /Library/Filesystems/macfuse.fs/Contents/Extensions/27/macfuse.kext
    ```
 3. Restart if prompted, then mount again.
-
-#### `libssl.so.1.0.0`
-
-You installed the prebuilt binaries but couldn't run it. Fix by installing rust and building from source.
 
 ### Contributing
 

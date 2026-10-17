@@ -29,8 +29,6 @@ sync_interval = 60
 # Mount options
 mount_options = [
     "fsname=GCSF",
-    # Allow file system access to root. This only works if `user_allow_other`
-    # is set in /etc/fuse.conf
     "allow_root",
 ]
 

@@ -236,7 +236,7 @@ assert_file_size_greater() {
     fi
 
     local actual_size
-    actual_size=$(stat -c%s "$filepath" 2>/dev/null || stat -f%z "$filepath" 2>/dev/null)
+    actual_size=$(stat -f%z "$filepath" 2>/dev/null)
 
     if [ "$actual_size" -gt "$min_size" ]; then
         log_pass "$description (size: $actual_size bytes)"
@@ -666,7 +666,7 @@ test_content_integrity() {
     printf '\x00\x01\x02\xFF' > "$test_dir/binary.dat"
     wait_for_sync
     local size
-    size=$(stat -c%s "$test_dir/binary.dat" 2>/dev/null || stat -f%z "$test_dir/binary.dat" 2>/dev/null)
+    size=$(stat -f%z "$test_dir/binary.dat" 2>/dev/null)
     if [ "$size" -eq 4 ]; then
         log_pass "Binary data size correct"
     else
@@ -906,7 +906,7 @@ test_large_file_sequential_read() {
     local_copy=$(mktemp)
     head -c $((size_mib * 1024 * 1024)) /dev/urandom > "$local_copy"
     local expected_sum
-    expected_sum=$(sha256sum < "$local_copy" | cut -d' ' -f1)
+    expected_sum=$(shasum -a 256 < "$local_copy" | cut -d' ' -f1)
 
     log_info "Uploading ${size_mib}MiB of random data"
     cp "$local_copy" "$test_dir/random.dat"
@@ -915,7 +915,7 @@ test_large_file_sequential_read() {
     # The first read may download the file from Drive; it must not be timed.
     log_info "Warming the cache and verifying content"
     local actual_sum
-    actual_sum=$(sha256sum < "$test_dir/random.dat" | cut -d' ' -f1)
+    actual_sum=$(shasum -a 256 < "$test_dir/random.dat" | cut -d' ' -f1)
     if [ "$actual_sum" = "$expected_sum" ]; then
         log_pass "Large file content matches after upload"
     else
@@ -942,8 +942,8 @@ test_large_file_sequential_read() {
     printf 'PATCHED' | dd of="$local_copy" bs=1 seek="$patch_offset" conv=notrunc 2>/dev/null
     printf 'PATCHED' | dd of="$test_dir/random.dat" bs=1 seek="$patch_offset" conv=notrunc 2>/dev/null
     wait_for_sync
-    expected_sum=$(sha256sum < "$local_copy" | cut -d' ' -f1)
-    actual_sum=$(sha256sum < "$test_dir/random.dat" | cut -d' ' -f1)
+    expected_sum=$(shasum -a 256 < "$local_copy" | cut -d' ' -f1)
+    actual_sum=$(shasum -a 256 < "$test_dir/random.dat" | cut -d' ' -f1)
     if [ "$actual_sum" = "$expected_sum" ]; then
         log_pass "Partial overwrite of large file reads back correctly"
     else
@@ -958,11 +958,7 @@ test_large_file_sequential_read() {
 #############################################################################
 # Prints the value of extended attribute $2 of file $1, or fails if it is absent.
 read_xattr() {
-    if command -v getfattr >/dev/null 2>&1; then
-        getfattr --only-values -n "$2" "$1" 2>/dev/null
-    else
-        xattr -p "$2" "$1" 2>/dev/null
-    fi
+    xattr -p "$2" "$1" 2>/dev/null
 }
 
 # Asserts that extended attribute $2 of file $1 matches the extended regex $3.
@@ -1024,8 +1020,8 @@ assert_xattr_absent() {
 test_drive_xattrs() {
     log_test "16" "Drive metadata exposed as extended attributes"
 
-    if ! command -v getfattr >/dev/null 2>&1 && ! command -v xattr >/dev/null 2>&1; then
-        log_fail "Neither getfattr (Linux: attr package) nor xattr (macOS) is installed"
+    if ! command -v xattr >/dev/null 2>&1; then
+        log_fail "xattr is not installed"
         return 1
     fi
 
@@ -1041,11 +1037,11 @@ test_drive_xattrs() {
     cp "$local_copy" "$file"
     wait_for_sync
     assert_xattr_equals "$file" user.gcsf.md5 \
-        "$(md5sum < "$local_copy" | cut -d' ' -f1)" "user.gcsf.md5 matches local md5"
+        "$(md5 -q < "$local_copy")" "user.gcsf.md5 matches local md5"
     assert_xattr_equals "$file" user.gcsf.sha1 \
-        "$(sha1sum < "$local_copy" | cut -d' ' -f1)" "user.gcsf.sha1 matches local sha1"
+        "$(shasum -a 1 < "$local_copy" | cut -d' ' -f1)" "user.gcsf.sha1 matches local sha1"
     assert_xattr_equals "$file" user.gcsf.sha256 \
-        "$(sha256sum < "$local_copy" | cut -d' ' -f1)" "user.gcsf.sha256 matches local sha256"
+        "$(shasum -a 256 < "$local_copy" | cut -d' ' -f1)" "user.gcsf.sha256 matches local sha256"
     assert_xattr_matches "$file" user.gcsf.id '^[A-Za-z0-9_-]{10,}$' "user.gcsf.id is a Drive id"
     assert_xattr_matches "$file" user.gcsf.mime_type '^[a-z]+/[^ ]+$' "user.gcsf.mime_type is a MIME type"
     assert_xattr_matches "$file" user.gcsf.owner '^[^@,]+@[^@,]+(,[^@,]+@[^@,]+)*$' "user.gcsf.owner is an email"
@@ -1061,7 +1057,7 @@ test_drive_xattrs() {
     printf 'PATCHED' | dd of="$file" bs=1 seek=1000 conv=notrunc 2>/dev/null
     wait_for_sync
     assert_xattr_equals "$file" user.gcsf.md5 \
-        "$(md5sum < "$local_copy" | cut -d' ' -f1)" "user.gcsf.md5 follows content changes"
+        "$(md5 -q < "$local_copy")" "user.gcsf.md5 follows content changes"
     assert_xattr_differs "$file" user.gcsf.revision "$revision" \
         "user.gcsf.revision changes with the content"
     assert_xattr_equals "$file" user.gcsf.id "$id" "user.gcsf.id is stable across content changes"
