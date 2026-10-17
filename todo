@@ -1,0 +1,10 @@
+gcsf setup opens the Google Drive API page and prints the seven steps that create a Desktop client for https://www.googleapis.com/auth/drive. The rebuilt binary is .build/debug/gcsf.
+
+Run .build/debug/gcsf setup. After you download the JSON:
+
+gcsf setup ~/Downloads/client_secret_….json
+gcsf login
+
+That replaces the shared client Google blocked. Session names already in the config stay. A Web client file is refused. While the app stays in Testing, the refresh token expires after 7 days, and gcsf login again is the renewal.
+
+The setup and login tests passed. This process did not open the page.
